@@ -311,7 +311,9 @@
       "addSuggestion": "Add",
       "suggestionPlaceholder": "Enter a suggestion text...",
       "noCustomSuggestions": "No custom suggestions yet",
-      "builtInSuggestions": "Built-in Suggestions"
+      "builtInSuggestions": "Built-in Suggestions",
+      "advancedMode": "Advanced Mode",
+      "advancedModeDesc": "Enable Code mode, Changes and Files panels for power users"
     },
     "about": {
       "title": "About",

@@ -14,6 +14,7 @@ import {
   MessageSquareText,
   Plus,
   X,
+  Wrench,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
@@ -29,6 +30,8 @@ import { SettingCard, SectionHeader, ToggleSwitch } from './shared'
 import { getPermissionPolicy, setPermissionPolicy, type PermissionPolicy } from '@/lib/permission-policy'
 import { PermissionBatchSection } from './PermissionBatchSection'
 import { useSuggestionsStore } from '@/stores/suggestions'
+import { useUIStore } from '@/stores/ui'
+import { useWorkspaceStore } from '@/stores/workspace'
 
 // Theme helpers
 const THEME_STORAGE_KEY = 'teamclaw-theme'
@@ -81,6 +84,9 @@ export const GeneralSection = React.memo(function GeneralSection() {
       i18next.off('languageChanged', handleLanguageChange);
     };
   }, []);
+  const advancedMode = useUIStore((s) => s.advancedMode)
+  const setAdvancedMode = useUIStore((s) => s.setAdvancedMode)
+  const workspacePath = useWorkspaceStore((s) => s.workspacePath)
   const [autoSave, setAutoSave] = React.useState(true)
   const [notificationLevel, setNotificationLevelState] = React.useState(() => {
     try {
@@ -160,13 +166,32 @@ export const GeneralSection = React.memo(function GeneralSection() {
       </SettingCard>
 
       <SettingCard>
+        <div className="flex items-center justify-between">
+          <div className="space-y-1">
+            <label className="text-sm font-medium flex items-center gap-2">
+              <Wrench className="h-4 w-4 text-muted-foreground" />
+              {t('settings.general.advancedMode', 'Advanced Mode')}
+            </label>
+            <p className="text-xs text-muted-foreground">
+              {t('settings.general.advancedModeDesc', 'Enable Code mode, Changes and Files panels for power users')}
+            </p>
+          </div>
+          <ToggleSwitch
+            enabled={advancedMode}
+            onChange={(v) => setAdvancedMode(v, workspacePath)}
+          />
+        </div>
+      </SettingCard>
+
+      {!import.meta.env.VITE_LOCALE || import.meta.env.VITE_LOCALE === 'all' ? (
+      <SettingCard>
 <div className="space-y-2">
   <label className="text-sm font-medium flex items-center gap-2">
     <Languages className="h-4 w-4 text-muted-foreground" />
     {t('common.language')}
   </label>
-  <Select 
-    value={language} 
+  <Select
+    value={language}
     onValueChange={(value) => {
       setLanguage(value);
       i18next.changeLanguage(value);
@@ -184,6 +209,7 @@ export const GeneralSection = React.memo(function GeneralSection() {
   </Select>
 </div>
       </SettingCard>
+      ) : null}
 
       <SettingCard>
         <div className="space-y-4">

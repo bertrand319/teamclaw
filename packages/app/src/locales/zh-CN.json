@@ -319,7 +319,9 @@
       "addSuggestion": "添加",
       "suggestionPlaceholder": "输入建议文本...",
       "noCustomSuggestions": "暂无自定义建议",
-      "builtInSuggestions": "内置建议"
+      "builtInSuggestions": "内置建议",
+      "advancedMode": "高级模式",
+      "advancedModeDesc": "启用 Code 模式、Changes 和 Files 面板"
     },
     "about": {
       "title": "关于",
