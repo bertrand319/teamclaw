@@ -159,14 +159,15 @@ export const GeneralSection = React.memo(function GeneralSection() {
         </div>
       </SettingCard>
 
+      {!import.meta.env.VITE_LOCALE || import.meta.env.VITE_LOCALE === 'all' ? (
       <SettingCard>
 <div className="space-y-2">
   <label className="text-sm font-medium flex items-center gap-2">
     <Languages className="h-4 w-4 text-muted-foreground" />
     {t('common.language')}
   </label>
-  <Select 
-    value={language} 
+  <Select
+    value={language}
     onValueChange={(value) => {
       setLanguage(value);
       i18next.changeLanguage(value);
@@ -184,6 +185,7 @@ export const GeneralSection = React.memo(function GeneralSection() {
   </Select>
 </div>
       </SettingCard>
+      ) : null}
 
       <SettingCard>
         <div className="space-y-4">
