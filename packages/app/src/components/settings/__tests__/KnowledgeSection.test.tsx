@@ -33,8 +33,8 @@ vi.mock('../shared', () => ({
   SectionHeader: ({ title }: { title: string }) => <h2>{title}</h2>,
 }))
 vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
-vi.mock('../../knowledge/IndexStatusPanel', () => ({ IndexStatusPanel: () => <div>index-status</div> }))
-vi.mock('../../knowledge/KnowledgeSearchPreview', () => ({ KnowledgeSearchPreview: () => <div>search-preview</div> }))
+vi.mock('../knowledge/IndexStatusPanel', () => ({ IndexStatusPanel: () => <div>index-status</div> }))
+vi.mock('../knowledge/KnowledgeSearchPreview', () => ({ KnowledgeSearchPreview: () => <div>search-preview</div> }))
 vi.mock('../KnowledgeConfigPanel', () => ({ KnowledgeConfigPanel: () => <div>config-panel</div> }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
 

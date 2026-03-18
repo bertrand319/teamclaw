@@ -172,7 +172,7 @@ describe('session-sse-lifecycle-handlers', () => {
     expect(clearStreamingSpy).not.toHaveBeenCalled()
   })
 
-  it('handleSessionIdle preserves streaming when buffer has content', () => {
+  it('handleSessionIdle preserves streaming when buffer has content', async () => {
     state.activeSessionId = 'sess-1'
     state.pendingQuestion = null
     state.pendingPermission = null
@@ -183,8 +183,8 @@ describe('session-sse-lifecycle-handlers', () => {
       updatedAt: new Date(),
     } as any)
 
-    const { hasBufferedContent } = vi.mocked(await import('@/stores/streaming'))
-    ;(hasBufferedContent as any).mockReturnValue(true)
+    const { hasBufferedContent } = await import('@/stores/streaming')
+    vi.mocked(hasBufferedContent).mockReturnValue(true)
 
     const clearStreamingSpy = vi.spyOn(useStreamingStore.getState(), 'clearStreaming')
 
@@ -194,7 +194,7 @@ describe('session-sse-lifecycle-handlers', () => {
     expect(clearStreamingSpy).not.toHaveBeenCalled()
   })
 
-  it('handleSessionIdle clears streaming when buffer is empty', () => {
+  it('handleSessionIdle clears streaming when buffer is empty', async () => {
     state.activeSessionId = 'sess-1'
     state.pendingQuestion = null
     state.pendingPermission = null
@@ -205,8 +205,8 @@ describe('session-sse-lifecycle-handlers', () => {
       updatedAt: new Date(),
     } as any)
 
-    const { hasBufferedContent } = vi.mocked(await import('@/stores/streaming'))
-    ;(hasBufferedContent as any).mockReturnValue(false)
+    const { hasBufferedContent } = await import('@/stores/streaming')
+    vi.mocked(hasBufferedContent).mockReturnValue(false)
 
     const clearStreamingSpy = vi.spyOn(useStreamingStore.getState(), 'clearStreaming')
 

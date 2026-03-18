@@ -12,6 +12,10 @@ vi.mock('@tauri-apps/plugin-fs', () => ({
   exists: vi.fn(),
 }))
 
+vi.mock('@tauri-apps/api/path', () => ({
+  join: vi.fn((...parts: string[]) => Promise.resolve(parts.join('/'))),
+}))
+
 import { readTextFile, writeTextFile, exists } from '@tauri-apps/plugin-fs'
 
 describe('gitignore-manager', () => {
