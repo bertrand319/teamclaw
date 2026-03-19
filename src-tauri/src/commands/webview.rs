@@ -74,7 +74,6 @@ pub fn init_shared_config(manager: &mut WebviewManager) {
 ///
 /// The JS code is eval'd, the result is stringified and sent back via Tauri event.
 /// Rust listens for the event with a 10-second timeout.
-#[cfg(debug_assertions)]
 #[tauri::command]
 pub async fn webview_eval_js(app: tauri::AppHandle, code: String) -> Result<String, String> {
     use tauri::Listener;
