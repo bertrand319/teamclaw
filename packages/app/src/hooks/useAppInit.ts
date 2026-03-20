@@ -77,34 +77,29 @@ export function useOpenCodeInit() {
     }
 
     let cancelled = false;
-    const delay = alreadyPreloading ? 0 : 300;
 
-    const timer = setTimeout(() => {
-      if (cancelled) return;
-      console.log(
-        alreadyPreloading
-          ? "[OpenCode] Awaiting preloaded server for:"
-          : "[OpenCode] Starting server for:",
-        workspacePath,
-      );
-      startOpenCode(workspacePath)
-        .then((status) => {
-          if (cancelled) return;
-          console.log("[OpenCode] Server started:", status);
-          initOpenCodeClient({ baseUrl: status.url, workspacePath });
-          setOpenCodeError(null);
-          setOpenCodeReady(true, status.url);
-        })
-        .catch((error) => {
-          if (cancelled) return;
-          console.error("[OpenCode] Failed to start server:", error);
-          setOpenCodeError(String(error));
-        });
-    }, delay);
+    console.log(
+      alreadyPreloading
+        ? "[OpenCode] Awaiting preloaded server for:"
+        : "[OpenCode] Starting server for:",
+      workspacePath,
+    );
+    startOpenCode(workspacePath)
+      .then((status) => {
+        if (cancelled) return;
+        console.log("[OpenCode] Server started:", status);
+        initOpenCodeClient({ baseUrl: status.url, workspacePath });
+        setOpenCodeError(null);
+        setOpenCodeReady(true, status.url);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        console.error("[OpenCode] Failed to start server:", error);
+        setOpenCodeError(String(error));
+      });
 
     return () => {
       cancelled = true;
-      clearTimeout(timer);
     };
   }, [workspacePath, setOpenCodeReady]);
 
@@ -283,11 +278,10 @@ export function useTauriBodyClass() {
 // Dependency check / setup guide
 // ─────────────────────────────────────────────────────────────────────────────
 
-export function useSetupGuide() {
+export function useSetupGuide(openCodeReady: boolean) {
   const [showSetupGuide, setShowSetupGuide] = useState(false);
   const {
     dependencies,
-    checked: depsChecked,
     checkDependencies,
   } = useDepsStore();
   const depsResultRef = useRef<{ checked: boolean; hasRequiredMissing: boolean }>({
@@ -296,7 +290,7 @@ export function useSetupGuide() {
   });
   const setupDecisionRef = useRef(getSetupDecision());
 
-  // Preload + dependency check on mount
+  // Dependency check — deferred until OpenCode is ready to avoid CPU contention
   useEffect(() => {
     const debugForceSetup = (() => {
       try {
@@ -311,42 +305,22 @@ export function useSetupGuide() {
     const decision = setupDecisionRef.current;
 
     if (decision === "skip") {
-      console.log("[Preload] Setup previously completed, skipping dep check");
       depsResultRef.current = { checked: true, hasRequiredMissing: false };
       return;
     }
 
-    console.log("[Preload] Checking dependencies (decision:", decision, ")");
+    // Wait for OpenCode to be ready before checking deps (reduces startup CPU contention)
+    if (!openCodeReady && isTauri()) return;
+
+    console.log("[Setup] Checking dependencies (decision:", decision, ")");
     checkDependencies().then((result) => {
       const hasRequiredMissing = result.some((d) => d.required && !d.installed);
       depsResultRef.current = { checked: true, hasRequiredMissing };
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Apply deps result once check completes
-  useEffect(() => {
-    const decision = setupDecisionRef.current;
-
-    if (depsResultRef.current.checked) {
-      if (
-        depsResultRef.current.hasRequiredMissing &&
-        (decision === "show" || decision === "silent-check")
-      ) {
-        setShowSetupGuide(true);
-      }
-      return;
-    }
-
-    if (depsChecked) return;
-
-    checkDependencies().then((result) => {
-      const hasRequiredMissing = result.some((d) => d.required && !d.installed);
       if (hasRequiredMissing && (decision === "show" || decision === "silent-check")) {
         setShowSetupGuide(true);
       }
     });
-  }, [depsChecked, checkDependencies]);
+  }, [openCodeReady, checkDependencies]);
 
   const handleRecheck = useCallback(async () => {
     return checkDependencies();

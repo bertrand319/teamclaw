@@ -19,6 +19,8 @@ pub struct OpenCodeState {
     pub workspace_path: Mutex<Option<String>>,
     /// Async lock that serializes `start_opencode` calls to prevent concurrent spawns.
     pub start_lock: tokio::sync::Mutex<()>,
+    /// Early launch state — set by setup hook, consumed by start_opencode.
+    pub early_launch: tokio::sync::Mutex<Option<EarlyLaunchState>>,
 }
 
 impl Default for OpenCodeState {
@@ -35,6 +37,7 @@ impl Default for OpenCodeState {
             is_dev_mode: Mutex::new(is_dev),
             workspace_path: Mutex::new(None),
             start_lock: tokio::sync::Mutex::new(()),
+            early_launch: tokio::sync::Mutex::new(None),
         }
     }
 }
@@ -54,6 +57,14 @@ pub struct OpenCodeStatus {
     pub workspace_path: Option<String>,
 }
 
+/// State for the early sidecar launch (initiated from setup hook before frontend).
+pub struct EarlyLaunchState {
+    /// The workspace path this early launch was started for.
+    pub workspace_path: String,
+    /// Receiver to await the result. Clone to subscribe.
+    pub result_rx: tokio::sync::watch::Receiver<Option<Result<OpenCodeStatus, String>>>,
+}
+
 /// Start OpenCode server as a sidecar process (or connect to external in dev mode)
 #[tauri::command]
 pub async fn start_opencode(
@@ -61,8 +72,54 @@ pub async fn start_opencode(
     state: State<'_, OpenCodeState>,
     config: OpenCodeConfig,
 ) -> Result<OpenCodeStatus, String> {
+    // Check if early launch is in progress for this workspace
+    {
+        let mut early_guard = state.early_launch.lock().await;
+        if let Some(early) = early_guard.as_ref() {
+            if early.workspace_path == config.workspace_path {
+                println!("[OpenCode] Reusing early launch for: {}", config.workspace_path);
+                let mut rx = early.result_rx.clone();
+                drop(early_guard);
+                // Wait for the early launch to complete
+                while rx.borrow().is_none() {
+                    if rx.changed().await.is_err() {
+                        break;
+                    }
+                }
+                let result = rx.borrow().clone();
+                let mut early_guard = state.early_launch.lock().await;
+                *early_guard = None;
+                match result {
+                    Some(Ok(status)) => return Ok(status),
+                    Some(Err(e)) => {
+                        println!("[OpenCode] Early launch failed ({}), retrying fresh", e);
+                    }
+                    None => {
+                        println!("[OpenCode] Early launch sender dropped, retrying fresh");
+                    }
+                }
+            } else {
+                println!("[OpenCode] Workspace mismatch, clearing early launch");
+                *early_guard = None;
+            }
+        }
+    }
+
+    start_opencode_inner(app, &state, config).await
+}
+
+/// Core sidecar startup logic, shared between the Tauri command and early launch.
+pub async fn start_opencode_inner(
+    app: AppHandle,
+    state: &OpenCodeState,
+    config: OpenCodeConfig,
+) -> Result<OpenCodeStatus, String> {
+    #[cfg(debug_assertions)]
+    let inner_t0 = std::time::Instant::now();
     // Serialize concurrent calls — only one start_opencode runs at a time.
     let _start_guard = state.start_lock.lock().await;
+    #[cfg(debug_assertions)]
+    eprintln!("[Startup] start_opencode_inner: lock acquired in {:.1}ms", inner_t0.elapsed().as_secs_f64() * 1000.0);
 
     let is_dev_mode = *state.is_dev_mode.lock().map_err(|e| e.to_string())?;
     let port = config.port.unwrap_or(DEFAULT_PORT);
@@ -270,59 +327,63 @@ pub async fn start_opencode(
     let port_str = port.to_string();
     let workspace_path = config.workspace_path.clone();
 
-    // Ensure opencode.json has a permission section with TeamClaw defaults
-    if let Err(e) = ensure_default_permissions(&workspace_path) {
-        eprintln!(
-            "[OpenCode] Warning: failed to ensure default permissions: {}",
-            e
-        );
-    }
+    // ── Pre-sidecar setup (parallelized) ──────────────────────────────
+    //
+    // Three branches run concurrently via tokio::join!:
+    //   1. opencode.json writers (sequential: permissions → config → binary paths)
+    //   2. ensure_inherent_skills (writes to .opencode/skills/, independent)
+    //   3. read_keyring_secrets (reads OS keyring, independent)
+    //
+    // resolve_config_secret_refs runs AFTER all three complete (depends on
+    // both the config writers finishing and keyring secrets being available).
 
-    // Ensure autoui/playwright MCPs and compass provider are present in opencode.json
-    if let Err(e) = ensure_inherent_config(&workspace_path) {
-        eprintln!(
-            "[OpenCode] Warning: failed to ensure inherent configs: {}",
-            e
-        );
-    }
-
-    // Ensure inherent skills are present in the workspace
-    if let Err(e) = ensure_inherent_skills(&workspace_path) {
-        eprintln!(
-            "[OpenCode] Warning: failed to ensure inherent skills: {}",
-            e
-        );
-    }
-
-    // Pre-process opencode.json before OpenCode reads it:
-    // 1. Fix architecture-specific binary paths for bundled MCP servers
-    // 2. Replace ${KEY} secret references with actual values from OS keyring
-    if let Err(e) = resolve_sidecar_binary_paths(&workspace_path) {
-        eprintln!("[OpenCode] Warning: failed to resolve binary paths: {}", e);
-    }
-
-    // Read secrets from OS keyring using spawn_blocking so that:
-    //  - The blocking keyring I/O runs on a dedicated thread (not a Tokio worker)
-    //  - macOS keychain password dialogs can properly display and block
+    let ws_for_config = workspace_path.clone();
+    let ws_for_skills = workspace_path.clone();
     let ws_for_keyring = workspace_path.clone();
-    let (mut secrets, failed_keys) =
-        tokio::task::spawn_blocking(move || read_keyring_secrets(&ws_for_keyring))
-            .await
-            .unwrap_or_else(|e| {
-                eprintln!("[OpenCode] spawn_blocking for keyring failed: {}", e);
-                (Vec::new(), Vec::new())
-            });
 
-    // If some secrets failed on the first attempt, retry.  The first read may
-    // have triggered the macOS keychain unlock dialog; once the user enters their
-    // password the keychain stays unlocked and the retry should succeed.
+    let (config_result, skills_result, keyring_result) = tokio::join!(
+        // Branch 1: opencode.json writers (must be sequential with each other)
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = ensure_default_permissions(&ws_for_config) {
+                eprintln!("[OpenCode] Warning: failed to ensure default permissions: {}", e);
+            }
+            if let Err(e) = ensure_inherent_config(&ws_for_config) {
+                eprintln!("[OpenCode] Warning: failed to ensure inherent configs: {}", e);
+            }
+            if let Err(e) = resolve_sidecar_binary_paths(&ws_for_config) {
+                eprintln!("[OpenCode] Warning: failed to resolve binary paths: {}", e);
+            }
+        }),
+        // Branch 2: inherent skills (writes to .opencode/skills/, no opencode.json conflict)
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = ensure_inherent_skills(&ws_for_skills) {
+                eprintln!("[OpenCode] Warning: failed to ensure inherent skills: {}", e);
+            }
+        }),
+        // Branch 3: keyring secrets
+        tokio::task::spawn_blocking(move || read_keyring_secrets(&ws_for_keyring))
+    );
+
+    // Unwrap spawn results (panics inside spawn_blocking become JoinErrors)
+    if let Err(e) = config_result {
+        eprintln!("[OpenCode] Config setup task panicked: {}", e);
+    }
+    if let Err(e) = skills_result {
+        eprintln!("[OpenCode] Skills setup task panicked: {}", e);
+    }
+
+    let (mut secrets, failed_keys) = keyring_result.unwrap_or_else(|e| {
+        eprintln!("[OpenCode] spawn_blocking for keyring failed: {}", e);
+        (Vec::new(), Vec::new())
+    });
+
+    // Keyring retry logic (unchanged from original)
     if !failed_keys.is_empty() {
         println!(
             "[OpenCode] {} secret(s) failed to read ({:?}), retrying after keychain unlock...",
             failed_keys.len(),
             failed_keys
         );
-        // Give the user a moment to finish the keychain dialog
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
         let ws_retry = workspace_path.clone();
@@ -342,9 +403,11 @@ pub async fn start_opencode(
             );
         }
 
-        // Use the retry result (it re-reads all secrets, not just the failed ones)
         secrets = retry_secrets;
     }
+
+    #[cfg(debug_assertions)]
+    eprintln!("[Startup] Pre-sidecar I/O (parallel): {:.1}ms", inner_t0.elapsed().as_secs_f64() * 1000.0);
 
     let original_config = resolve_config_secret_refs(&workspace_path, &secrets);
 
@@ -461,6 +524,12 @@ pub async fn start_opencode(
         let mut workspace_guard = state.workspace_path.lock().map_err(|e| e.to_string())?;
         *workspace_guard = Some(workspace_path.clone());
     }
+
+    #[cfg(debug_assertions)]
+    eprintln!("[Startup] start_opencode_inner TOTAL: {:.1}ms", inner_t0.elapsed().as_secs_f64() * 1000.0);
+
+    // Persist workspace for early launch on next startup
+    write_last_workspace(&workspace_path);
 
     Ok(OpenCodeStatus {
         is_running: true,
@@ -1361,6 +1430,46 @@ pub async fn write_opencode_allowlist(
         rules.len()
     );
     Ok(())
+}
+
+/// Path to the file that persists the last workspace for early launch.
+fn last_workspace_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    std::path::PathBuf::from(home)
+        .join(".teamclaw")
+        .join("last-workspace.json")
+}
+
+/// Read the last workspace path from ~/.teamclaw/last-workspace.json.
+pub fn read_last_workspace() -> Option<String> {
+    let path = last_workspace_path();
+    let content = std::fs::read_to_string(&path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let ws = json.get("workspace_path")?.as_str()?;
+    // Verify the directory still exists
+    if std::path::Path::new(ws).is_dir() {
+        Some(ws.to_string())
+    } else {
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "[EarlyLaunch] Last workspace '{}' no longer exists, skipping",
+            ws
+        );
+        None
+    }
+}
+
+/// Persist the workspace path for next launch.
+fn write_last_workspace(workspace_path: &str) {
+    let path = last_workspace_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let json = serde_json::json!({ "workspace_path": workspace_path });
+    let _ = std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&json).unwrap_or_default(),
+    );
 }
 
 /// Get OpenCode server status
