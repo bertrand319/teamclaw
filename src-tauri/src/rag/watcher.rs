@@ -139,15 +139,11 @@ async fn handle_file_event(
             if path.is_file() {
                 tracing::info!("File changed, re-indexing: {:?}", path);
                 
-                // Get relative path
-                let relative_path = path
-                    .strip_prefix(knowledge_dir)
-                    .unwrap_or(path)
-                    .to_string_lossy()
-                    .to_string();
+                // Use absolute path for indexing
+                let absolute_path = path.to_string_lossy().to_string();
 
                 // Index the single file
-                if let Err(e) = indexer.index_directory(Some(&relative_path)).await {
+                if let Err(e) = indexer.index_directory(Some(&absolute_path)).await {
                     tracing::error!("Failed to index file {:?}: {}", path, e);
                     return Ok(false);
                 }
@@ -155,13 +151,9 @@ async fn handle_file_event(
             } else if path.is_dir() {
                 // Directory created, scan it
                 tracing::info!("Directory changed, re-indexing: {:?}", path);
-                let relative_path = path
-                    .strip_prefix(knowledge_dir)
-                    .unwrap_or(path)
-                    .to_string_lossy()
-                    .to_string();
+                let absolute_path = path.to_string_lossy().to_string();
 
-                if let Err(e) = indexer.index_directory(Some(&relative_path)).await {
+                if let Err(e) = indexer.index_directory(Some(&absolute_path)).await {
                     tracing::error!("Failed to index directory {:?}: {}", path, e);
                     return Ok(false);
                 }
