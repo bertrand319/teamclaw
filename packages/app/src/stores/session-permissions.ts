@@ -61,6 +61,43 @@ async function loadPermissionConfig(): Promise<Record<string, string>> {
  */
 const _alwaysAllowedPermissions = new Set<string>();
 
+/**
+ * Write a permission as "allow" into opencode.json so OpenCode itself
+ * stops asking for this permission type entirely.
+ */
+async function setPermissionAllowInConfig(permissionType: string): Promise<void> {
+  if (!isTauri()) return;
+
+  const workspacePath = useWorkspaceStore.getState().workspacePath;
+  if (!workspacePath) return;
+
+  try {
+    const { readTextFile, writeTextFile, exists } = await import("@tauri-apps/plugin-fs");
+    const configPath = `${workspacePath}/opencode.json`;
+
+    let config: Record<string, unknown> = {};
+    if (await exists(configPath)) {
+      const content = await readTextFile(configPath);
+      config = JSON.parse(content);
+    }
+
+    const permission = (config.permission as Record<string, string>) || {};
+    if (permission[permissionType] === "allow") return; // already set
+
+    permission[permissionType] = "allow";
+    config.permission = permission;
+
+    await writeTextFile(configPath, JSON.stringify(config, null, 2));
+
+    // Update the in-memory cache
+    _permConfigCache = permission;
+
+    console.log("[Session] Set permission '%s' to 'allow' in opencode.json", permissionType);
+  } catch (err) {
+    console.error("[Session] Failed to update opencode.json permission:", err);
+  }
+}
+
 /** Pre-load the permission config cache. Call early so it's available synchronously later. */
 export function loadPermissionConfigCache(): void {
   loadPermissionConfig().catch(() => { /* ignore */ });
@@ -257,6 +294,10 @@ export function createPermissionActions(set: SessionSet, get: SessionGet) {
             // Cache in memory so subsequent requests for same permission type are auto-approved
             if (permEvent.permission) {
               _alwaysAllowedPermissions.add(permEvent.permission);
+              // Write to opencode.json so OpenCode itself stops asking
+              setPermissionAllowInConfig(permEvent.permission).catch((err) => {
+                console.error("[Session] Failed to set permission in opencode.json:", err);
+              });
             }
             persistAllowlistRule(permEvent).catch((err) => {
               console.error("[Session] Failed to persist allowlist rule to DB:", err);
