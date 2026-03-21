@@ -18,8 +18,6 @@ import { useAppVersion } from "@/lib/version";
 import { Button } from "@/components/ui/button";
 import { SettingCard, SectionHeader } from "./shared";
 import { openExternalUrl } from "@/lib/utils";
-import { useTeamModeStore } from "@/stores/team-mode";
-import { toast } from "sonner";
 
 export const AboutSection = React.memo(function AboutSection() {
   const { t } = useTranslation();
@@ -27,11 +25,6 @@ export const AboutSection = React.memo(function AboutSection() {
   const update = useUpdaterStore((s) => s.update);
   const checkForUpdates = useUpdaterStore((s) => s.checkForUpdates);
   const installUpdate = useUpdaterStore((s) => s.installUpdate);
-  const devUnlocked = useTeamModeStore((s) => s.devUnlocked);
-  const setDevUnlocked = useTeamModeStore((s) => s.setDevUnlocked);
-  const devClickCount = React.useRef(0);
-  const devClickTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
-
   const isChecking = update.state === "checking";
   const isAvailable = update.state === "available";
   const isUpToDate = update.state === "up-to-date";
@@ -61,22 +54,7 @@ export const AboutSection = React.memo(function AboutSection() {
             />
             <div>
               <h4 className="font-semibold text-lg">TeamClaw</h4>
-              <p
-                className="text-sm text-muted-foreground select-none cursor-default"
-                onClick={() => {
-                  if (devUnlocked) return;
-                  devClickCount.current += 1;
-                  if (devClickTimer.current) clearTimeout(devClickTimer.current);
-                  devClickTimer.current = setTimeout(() => {
-                    devClickCount.current = 0;
-                  }, 2000);
-                  if (devClickCount.current >= 3) {
-                    devClickCount.current = 0;
-                    setDevUnlocked(true);
-                    toast.success('Dev mode unlocked');
-                  }
-                }}
-              >
+              <p className="text-sm text-muted-foreground">
                 Version {appVersion}
               </p>
             </div>

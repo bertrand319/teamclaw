@@ -150,6 +150,10 @@ export function Settings(_props?: SettingsProps) {
   const [advancedExpanded, setAdvancedExpanded] = React.useState(false)
   const appVersion = useAppVersion()
   const teamMode = useTeamModeStore(s => s.teamMode)
+  const devUnlocked = useTeamModeStore(s => s.devUnlocked)
+  const setDevUnlocked = useTeamModeStore(s => s.setDevUnlocked)
+  const devClickCount = React.useRef(0)
+  const devClickTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // Filter sections based on build config feature flags
   const filteredPrimarySections = React.useMemo(() =>
@@ -275,7 +279,20 @@ export function Settings(_props?: SettingsProps) {
 
         {/* Footer */}
         <div className="px-4 py-3 border-t flex items-center justify-between">
-          <span className="text-xs text-muted-foreground">
+          <span
+            className="text-xs text-muted-foreground select-none cursor-default"
+            onClick={() => {
+              if (devUnlocked) return
+              devClickCount.current += 1
+              if (devClickTimer.current) clearTimeout(devClickTimer.current)
+              devClickTimer.current = setTimeout(() => { devClickCount.current = 0 }, 2000)
+              if (devClickCount.current >= 3) {
+                devClickCount.current = 0
+                setDevUnlocked(true)
+                import('sonner').then(({ toast }) => toast.success('Dev mode unlocked'))
+              }
+            }}
+          >
             v{appVersion}
           </span>
           <UpdateButton />
