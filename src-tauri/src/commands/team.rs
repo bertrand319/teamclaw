@@ -681,15 +681,36 @@ pub async fn team_sync_repo(
         return Err(format!("git fetch failed: {}", stderr.trim()));
     }
 
-    let (ok, stdout, _) = run_git(&["rev-parse", "--abbrev-ref", "HEAD"], &team_dir)?;
-    let branch = if ok {
-        stdout.trim().to_string()
-    } else {
-        "main".to_string()
+    // Determine the branch to sync: prefer current HEAD, then remote default, then "main"
+    let branch = {
+        let (ok, stdout, _) = run_git(&["rev-parse", "--abbrev-ref", "HEAD"], &team_dir)?;
+        if ok && !stdout.trim().is_empty() && stdout.trim() != "HEAD" {
+            stdout.trim().to_string()
+        } else {
+            // Fallback: detect remote default branch via origin/HEAD
+            let (ok2, stdout2, _) =
+                run_git(&["symbolic-ref", "refs/remotes/origin/HEAD", "--short"], &team_dir)?;
+            if ok2 && !stdout2.trim().is_empty() {
+                // stdout2 is like "origin/main", strip the "origin/" prefix
+                stdout2.trim().strip_prefix("origin/").unwrap_or(stdout2.trim()).to_string()
+            } else {
+                "main".to_string()
+            }
+        }
     };
 
+    // Verify that origin/<branch> actually exists before resetting
+    let remote_ref = format!("origin/{}", branch);
+    let (ref_exists, _, _) = run_git(&["rev-parse", "--verify", &remote_ref], &team_dir)?;
+    if !ref_exists {
+        return Err(format!(
+            "Remote branch '{}' not found. The remote repository may be empty or use a different default branch.",
+            remote_ref
+        ));
+    }
+
     let (ok, _, stderr) = run_git(
-        &["reset", "--hard", &format!("origin/{}", branch)],
+        &["reset", "--hard", &remote_ref],
         &team_dir,
     )?;
     if !ok {
