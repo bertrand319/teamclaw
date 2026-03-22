@@ -206,8 +206,13 @@ export function useGitReposInit() {
                 if (teamConfig?.enabled) {
                   const doSync = () => {
                     invoke("team_sync_repo")
-                      .then(() => {
-                        console.log("[App] Team repo sync completed (MCP configs updated)");
+                      .then((result: unknown) => {
+                        const r = result as { success: boolean; message: string };
+                        if (r.success) {
+                          console.log("[App] Team repo sync completed (MCP configs updated)");
+                        } else {
+                          console.warn("[App] Team repo sync skipped:", r.message);
+                        }
                       })
                       .catch((err: unknown) => {
                         console.warn("[App] Team repo sync failed (non-critical):", err);

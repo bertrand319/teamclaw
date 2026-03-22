@@ -681,6 +681,15 @@ pub async fn team_sync_repo(
         return Err(format!("git fetch failed: {}", stderr.trim()));
     }
 
+    // Check for local modifications before resetting
+    let (_, status_out, _) = run_git(&["status", "--porcelain"], &team_dir)?;
+    if !status_out.trim().is_empty() {
+        return Ok(TeamGitResult {
+            success: false,
+            message: "Sync skipped: you have local changes. Please commit or discard them before syncing.".to_string(),
+        });
+    }
+
     // Determine the branch to sync: prefer current HEAD, then remote default, then "main"
     let branch = {
         let (ok, stdout, _) = run_git(&["rev-parse", "--abbrev-ref", "HEAD"], &team_dir)?;
