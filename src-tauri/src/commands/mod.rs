@@ -11,7 +11,6 @@ pub mod local_stats;
 pub mod mcp;
 pub mod opencode;
 pub mod spotlight;
-pub mod rag_http_server;
 pub mod skillssh;
 pub mod team;
 pub mod team_webdav;

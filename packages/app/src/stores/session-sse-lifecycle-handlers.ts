@@ -54,12 +54,6 @@ export function createLifecycleHandlers(set: SessionSet, get: SessionGet) {
       const { activeSessionId } = get();
       const workspacePath = useWorkspaceStore.getState().workspacePath;
 
-      const memorySessionId = localStorage.getItem('teamclaw-memory-session-id');
-      if (memorySessionId && event.sessionId === memorySessionId) {
-        console.log("[Session] Ignoring SSE for memory session:", event.sessionId);
-        return;
-      }
-
       if (event.parentID && event.parentID === activeSessionId) {
         console.log("[Session] Child session detected:", event.sessionId, "parent:", event.parentID);
         registerChildSession(event.sessionId);
@@ -113,12 +107,6 @@ export function createLifecycleHandlers(set: SessionSet, get: SessionGet) {
 
       if (isChildSession(event.sessionId)) {
         console.log("[Session] Ignoring SSE update for child session:", event.sessionId);
-        return;
-      }
-
-      const memorySessionId = localStorage.getItem('teamclaw-memory-session-id');
-      if (memorySessionId && event.sessionId === memorySessionId) {
-        console.log("[Session] Ignoring SSE update for memory session:", event.sessionId);
         return;
       }
 

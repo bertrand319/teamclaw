@@ -72,6 +72,12 @@ impl Default for WeChatGatewayStatusResponse {
 #[serde(rename_all = "camelCase")]
 pub struct WeChatQrLoginResponse {
     pub qrcode: String,
+    /// API returns snake_case (`qrcode_img_content`); keep camelCase for Tauri → frontend JSON.
+    #[serde(
+        alias = "qrcode_img_content",
+        alias = "QRCodeImgContent",
+        alias = "qrcodeimgcontent"
+    )]
     pub qrcode_img_content: String,
 }
 

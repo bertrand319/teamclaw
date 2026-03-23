@@ -555,41 +555,6 @@ export function createMessageHandlers(set: SessionSet, get: SessionGet) {
           send(nextMessage.content);
         }
       }, 300);
-
-      // Memory extraction: analyze completed conversation for memorizable content
-      const memorySessionId = localStorage.getItem('teamclaw-memory-session-id')
-      if (event.sessionId !== memorySessionId) {
-        setTimeout(async () => {
-          try {
-            const { shouldExtractMemory, extractMemories, isExtractionDebounced } = await import('@/lib/memory-extraction')
-            const { useWorkspaceStore } = await import('./workspace')
-            const workspacePath = useWorkspaceStore.getState().workspacePath
-            if (!workspacePath) return
-
-            const { useKnowledgeStore } = await import('./knowledge')
-            const config = useKnowledgeStore.getState().config
-            if (config?.memoryEnabled === false) return
-            if (config?.memoryAutoExtract === false) return
-
-            if (isExtractionDebounced(event.sessionId)) return
-
-            const session = getSessionById(event.sessionId)
-            if (!session) return
-
-            const conversationMessages = session.messages
-              .filter(m => m.role === 'user' || m.role === 'assistant')
-              .filter(m => m.content && m.content.trim())
-              .map(m => ({ role: m.role as 'user' | 'assistant', content: m.content }))
-
-            if (shouldExtractMemory(conversationMessages)) {
-              if (DEBUG()) console.log('[Memory] Auto-extracting for:', event.sessionId)
-              extractMemories(conversationMessages, event.sessionId, workspacePath)
-            }
-          } catch (error) {
-            console.error('[Memory] Auto-extraction trigger failed:', error)
-          }
-        }, 2000)
-      }
     },
   };
 }

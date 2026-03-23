@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tauri::Emitter;
 use tokio::sync::Mutex;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 const KEYRING_SERVICE: &str = "teamclaw-oss";
 const TOKEN_REFRESH_MARGIN_SECS: i64 = 300; // refresh 5 min before expiry
@@ -183,12 +183,9 @@ impl OssSyncManager {
         self.oss_config = Some(resp.oss.clone());
         self.s3_client = Some(Self::create_s3_client(&resp.credentials, &resp.oss));
 
-        if let Ok(role) = resp.role.as_str() {
-            if role == "owner" {
-                self.role = TeamRole::Owner;
-            } else {
-                self.role = TeamRole::Member;
-            }
+        match resp.role.as_str() {
+            "owner" => self.role = TeamRole::Owner,
+            _ => self.role = TeamRole::Member,
         }
 
         info!("OSS STS token refreshed successfully");
@@ -294,11 +291,9 @@ impl OssSyncManager {
                 .await
                 .map_err(|e| format!("S3 LIST {prefix} failed: {e}"))?;
 
-            if let Some(contents) = resp.contents() {
-                for obj in contents {
-                    if let Some(key) = obj.key() {
-                        keys.push(key.to_string());
-                    }
+            for obj in resp.contents() {
+                if let Some(key) = obj.key() {
+                    keys.push(key.to_string());
                 }
             }
 
@@ -412,13 +407,14 @@ impl OssSyncManager {
 
             // Check if the file exists in the doc with the same hash
             let needs_update = match files_map.get(path) {
-                Some(loro::LoroValue::Map(entry)) => {
-                    match entry.get("hash") {
+                Some(voc) => match voc.get_deep_value() {
+                    loro::LoroValue::Map(entry) => match entry.get("hash") {
                         Some(loro::LoroValue::String(h)) => h.as_ref() != local_hash,
                         _ => true,
-                    }
-                }
-                _ => true,
+                    },
+                    _ => true,
+                },
+                None => true,
             };
 
             if needs_update {
@@ -455,7 +451,7 @@ impl OssSyncManager {
 
                     if deleted {
                         // Remove file from disk if it exists
-                        let file_path = dir.join(path.as_ref());
+                        let file_path = dir.join(Path::new(path.as_str()));
                         if file_path.exists() {
                             let _ = std::fs::remove_file(&file_path);
                         }
@@ -463,7 +459,7 @@ impl OssSyncManager {
                         doc_files.insert(path.to_string());
 
                         if let Some(loro::LoroValue::String(content_str)) = entry.get("content") {
-                            let file_path = dir.join(path.as_ref());
+                            let file_path = dir.join(Path::new(path.as_str()));
                             if let Some(parent) = file_path.parent() {
                                 std::fs::create_dir_all(parent).map_err(|e| {
                                     format!("Failed to create dir {}: {e}", parent.display())
@@ -554,7 +550,7 @@ impl OssSyncManager {
                             Some(loro::LoroValue::Bool(b)) => *b,
                             _ => false,
                         };
-                        if !deleted && !local_files.contains_key(path.as_ref()) {
+                        if !deleted && !local_files.contains_key(path.as_str()) {
                             has_deletions = true;
                             break;
                         }
@@ -584,20 +580,24 @@ impl OssSyncManager {
 
                     // TODO: Verify the LoroMap sub-map creation API. The idea is to
                     // create/update a nested map entry for each file path.
-                    let entry = files_map.get_or_create_container(path, loro::ContainerType::Map)
+                    let entry_map = files_map
+                        .get_or_create_container(path, loro::LoroMap::new())
                         .map_err(|e| format!("Failed to get/create map entry for {path}: {e}"))?;
-                    if let loro::Handler::Map(entry_map) = entry {
-                        entry_map.insert("content", content_str.as_str())
-                            .map_err(|e| format!("Failed to set content for {path}: {e}"))?;
-                        entry_map.insert("hash", hash.as_str())
-                            .map_err(|e| format!("Failed to set hash for {path}: {e}"))?;
-                        entry_map.insert("deleted", false)
-                            .map_err(|e| format!("Failed to set deleted for {path}: {e}"))?;
-                        entry_map.insert("updatedBy", node_id.as_str())
-                            .map_err(|e| format!("Failed to set updatedBy for {path}: {e}"))?;
-                        entry_map.insert("updatedAt", now.as_str())
-                            .map_err(|e| format!("Failed to set updatedAt for {path}: {e}"))?;
-                    }
+                    entry_map
+                        .insert("content", content_str.as_str())
+                        .map_err(|e| format!("Failed to set content for {path}: {e}"))?;
+                    entry_map
+                        .insert("hash", hash.as_str())
+                        .map_err(|e| format!("Failed to set hash for {path}: {e}"))?;
+                    entry_map
+                        .insert("deleted", false)
+                        .map_err(|e| format!("Failed to set deleted for {path}: {e}"))?;
+                    entry_map
+                        .insert("updatedBy", node_id.as_str())
+                        .map_err(|e| format!("Failed to set updatedBy for {path}: {e}"))?;
+                    entry_map
+                        .insert("updatedAt", now.as_str())
+                        .map_err(|e| format!("Failed to set updatedAt for {path}: {e}"))?;
                 }
             }
 
@@ -610,18 +610,19 @@ impl OssSyncManager {
                             Some(loro::LoroValue::Bool(b)) => *b,
                             _ => false,
                         };
-                        if !deleted && !local_files.contains_key(path.as_ref()) {
-                            let container = files_map
-                                .get_or_create_container(path, loro::ContainerType::Map)
+                        if !deleted && !local_files.contains_key(path.as_str()) {
+                            let entry_map = files_map
+                                .get_or_create_container(path, loro::LoroMap::new())
                                 .map_err(|e| format!("Failed to get map entry for {path}: {e}"))?;
-                            if let loro::Handler::Map(entry_map) = container {
-                                entry_map.insert("deleted", true)
-                                    .map_err(|e| format!("Failed to mark deleted for {path}: {e}"))?;
-                                entry_map.insert("updatedBy", node_id.as_str())
-                                    .map_err(|e| format!("Failed to set updatedBy for {path}: {e}"))?;
-                                entry_map.insert("updatedAt", now.as_str())
-                                    .map_err(|e| format!("Failed to set updatedAt for {path}: {e}"))?;
-                            }
+                            entry_map
+                                .insert("deleted", true)
+                                .map_err(|e| format!("Failed to mark deleted for {path}: {e}"))?;
+                            entry_map
+                                .insert("updatedBy", node_id.as_str())
+                                .map_err(|e| format!("Failed to set updatedBy for {path}: {e}"))?;
+                            entry_map
+                                .insert("updatedAt", now.as_str())
+                                .map_err(|e| format!("Failed to set updatedAt for {path}: {e}"))?;
                         }
                     }
                 }
@@ -817,7 +818,7 @@ impl OssSyncManager {
         doc_type: DocType,
     ) -> Result<CleanupResult, String> {
         let mut deleted_count: u32 = 0;
-        let mut freed_bytes: u64 = 0;
+        let freed_bytes: u64 = 0;
 
         // Find latest snapshot timestamp
         let snapshot_prefix = format!(
@@ -862,20 +863,28 @@ impl OssSyncManager {
         );
         let update_keys = self.s3_list(&updates_prefix).await?;
 
-        let known_set = self.known_files.entry(doc_type).or_default();
-        for key in &update_keys {
-            let file_ts: i64 = key
-                .rsplit('/')
-                .next()
-                .and_then(|f| f.strip_suffix(".bin"))
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(i64::MAX);
+        let keys_to_purge: Vec<String> = update_keys
+            .iter()
+            .filter(|key| {
+                let file_ts: i64 = key
+                    .rsplit('/')
+                    .next()
+                    .and_then(|f| f.strip_suffix(".bin"))
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(i64::MAX);
+                file_ts < snapshot_ts
+            })
+            .cloned()
+            .collect();
 
-            if file_ts < snapshot_ts {
-                self.s3_delete(key).await?;
-                deleted_count += 1;
-                known_set.remove(key);
-            }
+        for key in &keys_to_purge {
+            self.s3_delete(key).await?;
+            deleted_count += 1;
+        }
+
+        let known_set = self.known_files.entry(doc_type).or_default();
+        for key in keys_to_purge {
+            known_set.remove(&key);
         }
 
         info!(

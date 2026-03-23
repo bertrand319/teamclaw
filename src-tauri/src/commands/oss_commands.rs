@@ -1,14 +1,12 @@
 use crate::commands::oss_types::*;
 use crate::commands::oss_sync::*;
-use crate::commands::team::TEAM_REPO_DIR;
 use crate::commands::TEAMCLAW_DIR;
 
 use serde_json::Value;
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
 use tauri::State;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -516,7 +514,7 @@ pub async fn oss_update_members(
 #[tauri::command]
 pub async fn oss_reset_team_secret(
     state: State<'_, OssSyncState>,
-    workspace_path: String,
+    _workspace_path: String,
 ) -> Result<String, String> {
     let new_secret = generate_team_secret()?;
 

@@ -259,9 +259,6 @@ pub fn run() {
             commands::knowledge::rag_save_config,
             commands::knowledge::rag_start_watcher,
             commands::knowledge::rag_stop_watcher,
-            commands::knowledge::rag_list_memories,
-            commands::knowledge::rag_save_memory,
-            commands::knowledge::rag_delete_memory,
             commands::opencode::start_opencode,
             commands::opencode::stop_opencode,
             commands::opencode::get_opencode_status,
@@ -464,16 +461,6 @@ pub fn run() {
         .setup(|app| {
             #[cfg(debug_assertions)]
             let setup_t0 = std::time::Instant::now();
-
-            // Start RAG HTTP API server for MCP bridge
-            let rag_state_handle = app.handle().state::<commands::knowledge::RagState>();
-            let rag_state_for_http = std::sync::Arc::new(rag_state_handle.inner().clone());
-            
-            tauri::async_runtime::spawn(async move {
-                if let Err(e) = commands::rag_http_server::start_http_server(rag_state_for_http, 13143).await {
-                    eprintln!("[RAG HTTP] Failed to start HTTP server: {}", e);
-                }
-            });
 
             // Initialize iroh P2P node in background (non-blocking)
             #[cfg(feature = "p2p")]

@@ -79,12 +79,10 @@ export function createLoaderActions(set: SessionSet, get: SessionGet) {
         );
 
         // Filter out archived, child, and internal sessions
-        const hiddenSessionId = localStorage.getItem('teamclaw-memory-session-id');
         const activeSessions = sessions.filter(
           (session) =>
             !session.time?.archived &&
-            !session.parentID &&
-            session.id !== hiddenSessionId,
+            !session.parentID,
         );
         const filteredCount = sessions.length - activeSessions.length;
         if (filteredCount > 0) {
