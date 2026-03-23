@@ -153,7 +153,7 @@ pub fn run() {
     let _guard = rt.enter();
     tauri::async_runtime::set(rt.handle().clone());
 
-    // Create RagState (HTTP server will be started in setup hook)
+    // RAG state for Tauri commands (MCP bridge uses standalone rag-mcp-server; see binaries README)
     let rag_state = commands::knowledge::RagState::default();
 
     tauri::Builder::default()
@@ -257,9 +257,6 @@ pub fn run() {
             commands::knowledge::rag_save_config,
             commands::knowledge::rag_start_watcher,
             commands::knowledge::rag_stop_watcher,
-            commands::knowledge::rag_list_memories,
-            commands::knowledge::rag_save_memory,
-            commands::knowledge::rag_delete_memory,
             commands::opencode::start_opencode,
             commands::opencode::stop_opencode,
             commands::opencode::get_opencode_status,

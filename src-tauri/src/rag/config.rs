@@ -37,16 +37,6 @@ pub struct RagConfig {
     pub auto_inject_threshold: f64,
     pub auto_inject_top_k: usize,
     pub auto_inject_max_tokens: usize,
-
-    // Long-term Memory
-    #[serde(default = "default_true")]
-    pub memory_enabled: bool,
-    #[serde(default = "default_true")]
-    pub memory_auto_extract: bool,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 fn default_knowledge_dirs() -> Vec<String> {
@@ -81,8 +71,6 @@ impl Default for RagConfig {
             auto_inject_threshold: 0.7,
             auto_inject_top_k: 3,
             auto_inject_max_tokens: 2000,
-            memory_enabled: true,
-            memory_auto_extract: true,
         }
     }
 }
