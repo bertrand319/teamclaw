@@ -54,7 +54,6 @@ export function TeamMemberList() {
   }, [])
 
   const isManager = canManageMembers()
-  const isOwner = myRole === 'owner'
 
   const handleAdd = async (nodeId: string, name: string, role: string, label: string) => {
     await addMember({
