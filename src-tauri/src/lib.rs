@@ -3,6 +3,7 @@
 
 use tauri::Manager;
 use tauri_plugin_global_shortcut::{Code, Modifiers, ShortcutState};
+use tauri_plugin_aptabase::EventTracker;
 
 mod commands;
 mod stt;
@@ -170,6 +171,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_aptabase::Builder::new("A-US-9094113207").build())
         .plugin({
             // Configure global shortcuts for Spotlight.
             // Errors in shortcut registration should not abort app startup, so we
@@ -234,6 +236,7 @@ pub fn run() {
         .manage(<commands::p2p_state::IrohState>::default())
         .manage(commands::spotlight::SpotlightState::default())
         .manage(tokio::sync::Mutex::new(commands::team_webdav::WebDavManagedState::default()))
+        .manage(commands::oss_sync::OssSyncState::default())
         .invoke_handler(tauri::generate_handler![
             commands::greet,
             commands::show_in_folder,
@@ -311,6 +314,14 @@ pub fn run() {
             commands::gateway::stop_wecom_gateway,
             commands::gateway::get_wecom_gateway_status,
             commands::gateway::test_wecom_credentials,
+            commands::gateway::get_wechat_config,
+            commands::gateway::save_wechat_config,
+            commands::gateway::start_wechat_gateway,
+            commands::gateway::stop_wechat_gateway,
+            commands::gateway::get_wechat_gateway_status,
+            commands::gateway::start_wechat_qr_login,
+            commands::gateway::poll_wechat_qr_status,
+            commands::gateway::test_wechat_connection,
             commands::cron::cron_init,
             commands::cron::cron_list_jobs,
             commands::cron::cron_add_job,
@@ -343,6 +354,7 @@ pub fn run() {
             commands::git::git_add,
             commands::git::git_status,
             commands::git::git_diff,
+            commands::git::git_checkout_file,
             commands::git::git_show_file,
             commands::team::get_team_status,
             commands::team::team_check_git_installed,
@@ -362,6 +374,8 @@ pub fn run() {
             commands::team_p2p::team_add_member,
             #[cfg(feature = "p2p")]
             commands::team_p2p::team_remove_member,
+            #[cfg(feature = "p2p")]
+            commands::team_p2p::team_update_member_role,
             #[cfg(feature = "p2p")]
             commands::team_p2p::p2p_check_team_dir,
             #[cfg(feature = "p2p")]
@@ -435,6 +449,17 @@ pub fn run() {
             commands::team_webdav::webdav_import_config,
             commands::team_webdav::webdav_get_status,
             commands::team_webdav::get_team_mode,
+            commands::oss_commands::oss_create_team,
+            commands::oss_commands::oss_join_team,
+            commands::oss_commands::oss_restore_sync,
+            commands::oss_commands::oss_leave_team,
+            commands::oss_commands::oss_sync_now,
+            commands::oss_commands::oss_get_sync_status,
+            commands::oss_commands::oss_create_snapshot,
+            commands::oss_commands::oss_cleanup_updates,
+            commands::oss_commands::oss_update_members,
+            commands::oss_commands::oss_reset_team_secret,
+            commands::oss_commands::oss_get_team_config,
         ])
         .setup(|app| {
             #[cfg(debug_assertions)]
@@ -790,18 +815,30 @@ pub fn run() {
                 });
             }
 
+            // Track app_started (always, regardless of consent)
+            app.handle().track_event("app_started", Some(serde_json::json!({
+                "version": env!("CARGO_PKG_VERSION"),
+                "platform": std::env::consts::OS,
+            })));
+
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|_app, _event| {
-            // macOS: clicking the Dock icon when all windows are hidden should show the main window
-            #[cfg(target_os = "macos")]
-            if let tauri::RunEvent::Reopen { has_visible_windows, .. } = _event {
-                if !has_visible_windows {
-                    let state = _app.state::<commands::spotlight::SpotlightState>();
-                    commands::spotlight::show_main_window(_app.clone(), state);
+        .run(|app, event| {
+            match event {
+                #[cfg(target_os = "macos")]
+                tauri::RunEvent::Reopen { has_visible_windows, .. } => {
+                    if !has_visible_windows {
+                        let state = app.state::<commands::spotlight::SpotlightState>();
+                        commands::spotlight::show_main_window(app.clone(), state);
+                    }
                 }
+                tauri::RunEvent::Exit => {
+                    app.track_event("app_exited", None);
+                    app.flush_events_blocking();
+                }
+                _ => {}
             }
         });
 }

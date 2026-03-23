@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { UNSUPPORTED_BINARY_EXTENSIONS } from "@/components/viewers/UnsupportedFileViewer";
 import { isTauri } from '@/lib/utils'
 import { ensureGitignoreEntries } from '@/lib/gitignore-manager'
+import { useTeamModeStore } from './team-mode'
 
 // Directories to hide from file tree (system directories)
 const HIDDEN_DIRECTORIES = new Set(['.teamclaw', '.opencode'])
@@ -370,7 +371,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       console.log("[Workspace] Found", entries.length, "entries");
 
       const nodes: FileNode[] = entries
-        .filter(entry => !HIDDEN_DIRECTORIES.has(entry.name))
+        .filter(entry => useTeamModeStore.getState().devUnlocked || !HIDDEN_DIRECTORIES.has(entry.name))
         .map(
           (entry) =>
             ({

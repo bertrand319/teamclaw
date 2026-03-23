@@ -15,6 +15,9 @@ pub mod rag_http_server;
 pub mod skillssh;
 pub mod team;
 pub mod team_webdav;
+pub mod oss_types;
+pub mod oss_sync;
+pub mod oss_commands;
 #[cfg(feature = "p2p")]
 pub mod team_p2p;
 pub mod p2p_state;

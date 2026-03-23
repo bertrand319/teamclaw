@@ -18,10 +18,12 @@ export interface CronPayload {
   message: string
   model?: string // "provider/model"
   timeoutSeconds?: number // Max seconds for AI to respond (default: 180)
+  useWorktree?: boolean
+  worktreeBranch?: string
 }
 
 export type DeliveryMode = 'announce' | 'none'
-export type DeliveryChannel = 'discord' | 'feishu' | 'email' | 'kook'
+export type DeliveryChannel = 'discord' | 'feishu' | 'email' | 'kook' | 'wechat'
 
 export interface CronDelivery {
   mode: DeliveryMode
@@ -57,6 +59,7 @@ export interface CronRunRecord {
   responseSummary?: string
   deliveryStatus?: string
   error?: string
+  worktreePath?: string
 }
 
 export interface CreateCronJobRequest {
@@ -318,6 +321,8 @@ export function getChannelDisplayName(channel: DeliveryChannel): string {
       return 'Email'
     case 'kook':
       return 'KOOK'
+    case 'wechat':
+      return 'WeChat'
     default:
       return channel
   }

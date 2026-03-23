@@ -1,6 +1,6 @@
 [package]
 name = "teamclaw"
-version = "0.1.2"
+version = "0.1.7"
 description = "TeamClaw - AI Agent Desktop Platform"
 authors = ["TeamClaw Team"]
 edition = "2021"
@@ -27,6 +27,7 @@ tauri-plugin-notification = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 tauri-plugin-global-shortcut = "2"
+tauri-plugin-aptabase = "1.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 indexmap = { version = "2", features = ["serde"] }
@@ -103,6 +104,11 @@ rayon = "1.10"  # Parallel iterator for recursive skill search
 
 # MCP plugin for AI agent integration (debug only)
 tauri-plugin-mcp = { path = "tauri-plugin-mcp-local" }
+
+# OSS sync dependencies
+aws-sdk-s3 = "1"
+aws-config = "1"
+loro = "1"
 
 # WebDAV team sync dependencies
 quick-xml = "0.36"

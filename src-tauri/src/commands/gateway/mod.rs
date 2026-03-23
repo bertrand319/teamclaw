@@ -7,6 +7,8 @@ pub mod feishu;
 pub mod feishu_config;
 pub mod kook;
 pub mod kook_config;
+pub mod wechat;
+pub mod wechat_config;
 pub mod wecom;
 pub mod wecom_config;
 pub mod session;
@@ -26,6 +28,8 @@ pub use feishu::FeishuGateway;
 pub use feishu_config::*;
 pub use kook::KookGateway;
 pub use kook_config::*;
+pub use wechat::WeChatGateway;
+pub use wechat_config::*;
 pub use wecom::WeComGateway;
 pub use wecom_config::*;
 pub use session::SessionMapping;
@@ -120,6 +124,7 @@ pub struct GatewayState {
     pub email_gateway: Mutex<Option<EmailGateway>>,
     pub kook_gateway: Mutex<Option<KookGateway>>,
     pub wecom_gateway: Mutex<Option<WeComGateway>>,
+    pub wechat_gateway: Mutex<Option<WeChatGateway>>,
     /// Shared session mapping across all gateways
     pub shared_session_mapping: SessionMapping,
     /// Whether the shared session mapping has been initialized with a persistence path
@@ -134,6 +139,7 @@ impl Default for GatewayState {
             email_gateway: Mutex::new(None),
             kook_gateway: Mutex::new(None),
             wecom_gateway: Mutex::new(None),
+            wechat_gateway: Mutex::new(None),
             shared_session_mapping: SessionMapping::new(),
             session_initialized: Mutex::new(false),
         }
@@ -1965,4 +1971,207 @@ pub async fn test_wecom_credentials(
     } else {
         Err("Unexpected response type".to_string())
     }
+}
+
+// ─── WeChat commands ─────────────────────────────────────────────────────────
+
+/// Get WeChat configuration
+#[tauri::command]
+pub async fn get_wechat_config(
+    opencode_state: State<'_, OpenCodeState>,
+) -> Result<WeChatConfig, String> {
+    let channels = get_channel_config(opencode_state).await?;
+    Ok(channels.wechat.unwrap_or_default())
+}
+
+/// Save WeChat configuration
+#[tauri::command]
+pub async fn save_wechat_config(
+    wechat: WeChatConfig,
+    opencode_state: State<'_, OpenCodeState>,
+    gateway_state: State<'_, GatewayState>,
+) -> Result<(), String> {
+    let workspace_path = opencode_state
+        .workspace_path
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone()
+        .ok_or("No workspace path set. Please select a workspace first.")?;
+
+    let mut config = read_config(&workspace_path)?;
+    let channels = config.channels.get_or_insert_with(ChannelsConfig::default);
+    channels.wechat = Some(wechat.clone());
+    write_config(&workspace_path, &config)?;
+
+    // Update gateway config if it exists
+    let gateway_clone = {
+        let gateway = gateway_state
+            .wechat_gateway
+            .lock()
+            .map_err(|e| e.to_string())?;
+        gateway.as_ref().map(|gw| gw.clone())
+    };
+
+    if let Some(gw) = gateway_clone {
+        gw.set_config(wechat).await;
+    }
+
+    Ok(())
+}
+
+/// Start WeChat gateway
+#[tauri::command]
+pub async fn start_wechat_gateway(
+    opencode_state: State<'_, OpenCodeState>,
+    gateway_state: State<'_, GatewayState>,
+) -> Result<(), String> {
+    let port = *opencode_state
+        .port
+        .lock()
+        .map_err(|e| e.to_string())?;
+
+    let workspace_path = opencode_state
+        .workspace_path
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone()
+        .ok_or("No workspace path set. Please select a workspace first.")?;
+
+    println!("[Gateway] start_wechat_gateway called, workspace={}", workspace_path);
+    let mut config = read_config(&workspace_path)?;
+    println!("[Gateway] config read ok, channels={}", config.channels.is_some());
+    let mut wechat_cfg = config
+        .channels
+        .as_ref()
+        .and_then(|c| c.wechat.clone())
+        .ok_or("WeChat configuration not found")?;
+    println!("[Gateway] wechat_config found, enabled={}, token_empty={}", wechat_cfg.enabled, wechat_cfg.bot_token.is_empty());
+
+    // Auto-enable WeChat when user explicitly clicks Start
+    if !wechat_cfg.enabled {
+        wechat_cfg.enabled = true;
+        let channels = config.channels.get_or_insert_with(ChannelsConfig::default);
+        channels.wechat = Some(wechat_cfg.clone());
+        write_config(&workspace_path, &config)?;
+    }
+
+    println!(
+        "[Gateway] WeChat starting: enabled={}, token={}",
+        wechat_cfg.enabled,
+        if wechat_cfg.bot_token.is_empty() { "empty" } else { "***" }
+    );
+
+    // Ensure shared session mapping is initialized
+    ensure_session_initialized(&gateway_state, &workspace_path).await;
+
+    let gateway_clone = {
+        let mut guard = gateway_state
+            .wechat_gateway
+            .lock()
+            .map_err(|e| e.to_string())?;
+
+        if guard.is_none() {
+            let gateway = WeChatGateway::new(port, gateway_state.shared_session_mapping.clone());
+            *guard = Some(gateway);
+        }
+
+        guard.as_ref().map(|gw| gw.clone())
+    };
+
+    if let Some(gw) = gateway_clone {
+        gw.set_config(wechat_cfg).await;
+        gw.set_workspace_path(workspace_path).await;
+        gw.start().await?;
+    }
+
+    Ok(())
+}
+
+/// Stop WeChat gateway
+#[tauri::command]
+pub async fn stop_wechat_gateway(
+    gateway_state: State<'_, GatewayState>,
+) -> Result<(), String> {
+    let gateway_clone = {
+        let guard = gateway_state
+            .wechat_gateway
+            .lock()
+            .map_err(|e| e.to_string())?;
+        guard.as_ref().map(|gw| gw.clone())
+    };
+
+    if let Some(gw) = gateway_clone {
+        gw.stop().await?;
+    }
+
+    Ok(())
+}
+
+/// Get WeChat gateway status
+#[tauri::command]
+pub async fn get_wechat_gateway_status(
+    gateway_state: State<'_, GatewayState>,
+) -> Result<WeChatGatewayStatusResponse, String> {
+    let gateway_clone = {
+        let guard = gateway_state
+            .wechat_gateway
+            .lock()
+            .map_err(|e| e.to_string())?;
+        guard.as_ref().map(|gw| gw.clone())
+    };
+
+    if let Some(gw) = gateway_clone {
+        Ok(gw.get_status().await)
+    } else {
+        Ok(WeChatGatewayStatusResponse::default())
+    }
+}
+
+/// Start WeChat QR login flow
+#[tauri::command]
+pub async fn start_wechat_qr_login() -> Result<WeChatQrLoginResponse, String> {
+    wechat::fetch_qr_code(&wechat_config::default_ilink_base_url()).await
+}
+
+/// Poll WeChat QR login status
+#[tauri::command]
+pub async fn poll_wechat_qr_status(
+    qrcode: String,
+    opencode_state: State<'_, OpenCodeState>,
+    _gateway_state: State<'_, GatewayState>,
+) -> Result<WeChatQrStatusResponse, String> {
+    let resp = wechat::poll_qr_status(&wechat_config::default_ilink_base_url(), &qrcode).await?;
+    if resp.status == "confirmed" {
+        if let (Some(token), Some(bot_id)) = (&resp.bot_token, &resp.ilink_bot_id) {
+            let base_url = resp.baseurl.clone().unwrap_or_else(wechat_config::default_ilink_base_url);
+            let wechat_cfg = WeChatConfig {
+                enabled: false,
+                bot_token: token.clone(),
+                account_id: bot_id.clone(),
+                base_url,
+                sync_buf: None,
+                context_tokens: std::collections::HashMap::new(),
+            };
+            // Save to config if workspace is set
+            if let Ok(guard) = opencode_state.workspace_path.lock() {
+                if let Some(ref workspace_path) = *guard {
+                    if let Ok(mut config) = read_config(workspace_path) {
+                        let channels = config.channels.get_or_insert_with(ChannelsConfig::default);
+                        channels.wechat = Some(wechat_cfg.clone());
+                        let _ = write_config(workspace_path, &config);
+                    }
+                }
+            }
+        }
+    }
+    Ok(resp)
+}
+
+/// Test WeChat connection
+#[tauri::command]
+pub async fn test_wechat_connection(bot_token: String) -> Result<String, String> {
+    if bot_token.is_empty() {
+        return Err("Bot token is required".to_string());
+    }
+    wechat::test_connection(&bot_token).await
 }
