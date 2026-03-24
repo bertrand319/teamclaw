@@ -1,8 +1,10 @@
 use std::collections::HashMap;
-use std::io::Cursor;
-use std::path::PathBuf;
-
 use base64::{engine::general_purpose::STANDARD, Engine};
+#[cfg(target_os = "macos")]
+use std::io::Cursor;
+#[cfg(target_os = "macos")]
+use std::path::PathBuf;
+#[cfg(target_os = "macos")]
 use flate2::read::GzDecoder;
 use futures_util::StreamExt;
 use minisign_verify::{PublicKey, Signature};

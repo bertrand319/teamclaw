@@ -276,6 +276,7 @@ pub fn run() {
         .manage(telemetry::commands::TelemetryState::default())
         .manage(crate::stt::SttState::default())
         .manage({
+            #[allow(unused_mut)]
             let mut wvm = commands::webview::WebviewManager::default();
             #[cfg(target_os = "macos")]
             commands::webview::init_shared_config(&mut wvm);

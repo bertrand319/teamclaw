@@ -190,6 +190,7 @@ pub async fn webview_create(
         label, url, x, y, width, height
     );
 
+    #[allow(unused_mut)]
     let mut webview_builder =
         tauri::webview::WebviewBuilder::new(&label, tauri::WebviewUrl::External(parsed_url))
             .user_agent(CHROME_UA);
