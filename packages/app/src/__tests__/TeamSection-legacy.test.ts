@@ -53,30 +53,28 @@ beforeEach(() => {
   }
 })
 
-describe('TeamSection Current Tabs (no legacy Git)', () => {
-  it('does not show a Git tab (legacy tab removed)', async () => {
+describe('TeamSection Current UI (no legacy tabs)', () => {
+  it('does not show any tabs (tab switcher was removed)', async () => {
     const { TeamSection } = await import('../components/settings/TeamSection')
 
     await act(async () => {
       render(React.createElement(TeamSection))
     })
 
-    // The Git tab no longer exists in the current UI
-    const tabs = screen.getAllByRole('tab')
-    expect(tabs.every(t => !t.textContent?.toLowerCase().includes('git'))).toBe(true)
+    // No tab switcher exists in the current UI — no Git, S3, P2P, or WebDAV tabs
+    const tabs = screen.queryAllByRole('tab')
+    expect(tabs.length).toBe(0)
   })
 
-  it('shows exactly 3 tabs: S3, P2P, WebDAV', async () => {
+  it('does not show a Git tab (legacy tab was never present in current UI)', async () => {
     const { TeamSection } = await import('../components/settings/TeamSection')
 
     await act(async () => {
       render(React.createElement(TeamSection))
     })
 
-    const tabs = screen.getAllByRole('tab')
-    expect(tabs.length).toBe(3)
-    expect(tabs.some(t => t.textContent?.includes('S3'))).toBe(true)
-    expect(tabs.some(t => t.textContent?.includes('P2P'))).toBe(true)
-    expect(tabs.some(t => t.textContent?.includes('WebDAV'))).toBe(true)
+    // No tabs at all means no Git tab either
+    const tabs = screen.queryAllByRole('tab')
+    expect(tabs.every(t => !t.textContent?.toLowerCase().includes('git'))).toBe(true)
   })
 })

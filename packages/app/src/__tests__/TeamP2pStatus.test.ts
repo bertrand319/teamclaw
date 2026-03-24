@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, act, fireEvent } from '@testing-library/react'
+import { render, screen, act } from '@testing-library/react'
 import * as React from 'react'
 
 // Mock react-i18next
@@ -45,22 +45,17 @@ beforeEach(() => {
   }
 })
 
-async function renderAndSwitchToP2P() {
+async function renderTeamSection() {
   const { TeamSection } = await import('../components/settings/TeamSection')
   await act(async () => {
     render(React.createElement(TeamSection))
   })
-  // Switch to P2P tab (OSS/S3 is default now)
-  await act(async () => {
-    const tabs = screen.getAllByRole('tab')
-    const p2pTab = tabs.find(t => t.textContent?.includes('P2P'))!
-    fireEvent.click(p2pTab)
-  })
+  // P2P content is directly visible — no tab switching required
 }
 
 describe('TeamP2P Shared Content Display', () => {
   it('shows shared content card in P2P tab', async () => {
-    await renderAndSwitchToP2P()
+    await renderTeamSection()
 
     // P2P tab shared content is always visible
     expect(screen.getByText('skills/')).toBeDefined()
@@ -69,7 +64,7 @@ describe('TeamP2P Shared Content Display', () => {
   })
 
   it('shows shared content info text', async () => {
-    await renderAndSwitchToP2P()
+    await renderTeamSection()
 
     // The component text: 'The following directories are synced via P2P:'
     expect(screen.getByText(/synced via P2P/i)).toBeDefined()

@@ -106,9 +106,9 @@ describe('TeamSection Join Approval Status', () => {
       await new Promise(r => setTimeout(r, 50))
     })
 
-    // Switch to P2P tab
+    // Default join mode is 'seed'; switch to 'ticket' mode to get the ticket input
     await act(async () => {
-      fireEvent.click(screen.getByRole('tab', { name: /p2p/i }))
+      fireEvent.click(screen.getByRole('button', { name: /use ticket instead/i }))
     })
 
     // Enter a ticket and click Join
@@ -163,8 +163,9 @@ describe('TeamSection Join Approval Status', () => {
       await new Promise(r => setTimeout(r, 50))
     })
 
+    // Default join mode is 'seed'; switch to 'ticket' mode to get the ticket input
     await act(async () => {
-      fireEvent.click(screen.getByRole('tab', { name: /p2p/i }))
+      fireEvent.click(screen.getByRole('button', { name: /use ticket instead/i }))
     })
 
     await waitFor(() => {

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, act } from '@testing-library/react'
+import { render, screen, act } from '@testing-library/react'
 import * as React from 'react'
 
 // Mock react-i18next
@@ -53,68 +53,41 @@ beforeEach(() => {
   }
 })
 
-describe('TeamSection Tab Switcher', () => {
-  it('renders S3, P2P and WebDAV tabs', async () => {
+describe('TeamSection (no tab switcher)', () => {
+  it('renders without any tabs (tab switcher was removed)', async () => {
     const { TeamSection } = await import('../components/settings/TeamSection')
 
     await act(async () => {
       render(React.createElement(TeamSection))
     })
 
-    // Current UI has S3 云同步, P2P, and WebDAV tabs
-    const tabs = screen.getAllByRole('tab')
-    expect(tabs.length).toBe(3)
-    expect(tabs.some(t => t.textContent?.includes('S3'))).toBe(true)
-    expect(tabs.some(t => t.textContent?.includes('P2P'))).toBe(true)
-    expect(tabs.some(t => t.textContent?.includes('WebDAV'))).toBe(true)
+    // The tab switcher no longer exists — no tab roles should be present
+    const tabs = screen.queryAllByRole('tab')
+    expect(tabs.length).toBe(0)
   })
 
-  it('defaults to S3/OSS tab', async () => {
+  it('renders a heading for the Team section', async () => {
     const { TeamSection } = await import('../components/settings/TeamSection')
 
     await act(async () => {
       render(React.createElement(TeamSection))
     })
 
-    const tabs = screen.getAllByRole('tab')
-    const ossTab = tabs.find(t => t.textContent?.includes('S3'))
-    expect(ossTab).toBeDefined()
-    expect(ossTab!.getAttribute('aria-selected')).toBe('true')
+    // SectionHeader renders an h3 with the team title
+    const headings = screen.getAllByRole('heading')
+    expect(headings.length).toBeGreaterThan(0)
   })
 
-  it('switches to P2P tab on click', async () => {
+  it('renders P2P config content directly without tab navigation', async () => {
     const { TeamSection } = await import('../components/settings/TeamSection')
 
     await act(async () => {
       render(React.createElement(TeamSection))
     })
 
-    const tabs = screen.getAllByRole('tab')
-    const p2pTab = tabs.find(t => t.textContent?.includes('P2P'))!
-    const ossTab = tabs.find(t => t.textContent?.includes('S3'))!
-
-    fireEvent.click(p2pTab)
-
-    expect(p2pTab.getAttribute('aria-selected')).toBe('true')
-    expect(ossTab.getAttribute('aria-selected')).toBe('false')
-  })
-
-  it('preserves S3 tab content when switching back', async () => {
-    const { TeamSection } = await import('../components/settings/TeamSection')
-
-    await act(async () => {
-      render(React.createElement(TeamSection))
-    })
-
-    const tabs = screen.getAllByRole('tab')
-    const p2pTab = tabs.find(t => t.textContent?.includes('P2P'))!
-    const ossTab = tabs.find(t => t.textContent?.includes('S3'))!
-
-    // Switch to P2P
-    fireEvent.click(p2pTab)
-    // Switch back to S3/OSS
-    fireEvent.click(ossTab)
-
-    expect(ossTab.getAttribute('aria-selected')).toBe('true')
+    // P2P content is always visible — no S3 or WebDAV tabs exist
+    const tabs = screen.queryAllByRole('tab')
+    expect(tabs.every(t => !t.textContent?.includes('S3'))).toBe(true)
+    expect(tabs.every(t => !t.textContent?.includes('WebDAV'))).toBe(true)
   })
 })

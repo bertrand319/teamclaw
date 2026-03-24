@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor, act, fireEvent } from '@testing-library/react'
+import { render, screen, waitFor, act } from '@testing-library/react'
 import * as React from 'react'
 
 // Mock react-i18next
@@ -85,20 +85,14 @@ beforeEach(() => {
 })
 
 describe('TeamSection Allowlist Integration', () => {
-  it('P2P tab shows Device ID section', async () => {
+  it('P2P content shows Device ID section', async () => {
     const { TeamSection } = await import('../components/settings/TeamSection')
 
     await act(async () => {
       render(React.createElement(TeamSection))
     })
 
-    // Switch to P2P tab (OSS is default now)
-    await act(async () => {
-      const tabs = screen.getAllByRole('tab')
-      const p2pTab = tabs.find(t => t.textContent?.includes('P2P'))!
-      fireEvent.click(p2pTab)
-    })
-
+    // P2P content is directly visible — no tab switching required
     // Wait for device info to load
     await waitFor(() => {
       // Should show the Device ID somewhere
@@ -106,20 +100,14 @@ describe('TeamSection Allowlist Integration', () => {
     })
   })
 
-  it('P2P tab shows team member list when owner', async () => {
+  it('P2P content shows team member list when owner', async () => {
     const { TeamSection } = await import('../components/settings/TeamSection')
 
     await act(async () => {
       render(React.createElement(TeamSection))
     })
 
-    // Switch to P2P tab (OSS is default now)
-    await act(async () => {
-      const tabs = screen.getAllByRole('tab')
-      const p2pTab = tabs.find(t => t.textContent?.includes('P2P'))!
-      fireEvent.click(p2pTab)
-    })
-
+    // P2P content is directly visible — no tab switching required
     // Wait for sync status to load (shows connected state with owner role)
     await waitFor(() => {
       expect(screen.getAllByText('Owner').length).toBeGreaterThan(0)
