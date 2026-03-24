@@ -1095,16 +1095,6 @@ export function TeamP2PConfig() {
         </>
       )}
 
-      {/* Device ID Section */}
-      {deviceInfo && (
-        <SettingCard>
-          <div className="space-y-3">
-            <p className="text-sm font-medium">{t('settings.team.deviceId', 'Device ID')}</p>
-            <p className="text-xs text-muted-foreground">{t('settings.team.deviceIdDesc', 'Your unique device identifier for team membership')}</p>
-            <DeviceIdDisplay nodeId={deviceInfo.nodeId} />
-          </div>
-        </SettingCard>
-      )}
 
       {/* Shared Content Info */}
       <SettingCard className="bg-gradient-to-br from-blue-50 to-indigo-50 dark:from-blue-950/30 dark:to-indigo-950/30 border-blue-200 dark:border-blue-800">
