@@ -30,7 +30,7 @@
     clippy::unwrap_or_default,
     clippy::useless_asref,
     clippy::useless_format,
-    clippy::useless_vec,
+    clippy::useless_vec
 )]
 
 use tauri::Manager;
