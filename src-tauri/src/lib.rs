@@ -898,6 +898,14 @@ pub fn run() {
                     }
                 }
                 tauri::RunEvent::Exit => {
+                    let oc_state = app.state::<commands::opencode::OpenCodeState>();
+                    if let Err(e) =
+                        tauri::async_runtime::block_on(commands::opencode::shutdown_opencode(
+                            oc_state.inner(),
+                        ))
+                    {
+                        eprintln!("[OpenCode] Failed to stop sidecar on app exit: {}", e);
+                    }
                     let _ = app.track_event("app_exited", None);
                     app.flush_events_blocking();
                 }

@@ -96,6 +96,8 @@ export const useTeamModeStore = create<TeamModeState>((set, get) => ({
           modelName: status.llm.modelName || status.llm.model,
         }
         set({ teamModelConfig: config })
+      } else {
+        set({ teamModelConfig: null })
       }
     } else {
       set({ teamMode: false, teamModelConfig: null })

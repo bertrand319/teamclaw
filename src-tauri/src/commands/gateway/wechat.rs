@@ -277,34 +277,71 @@ pub async fn send_text_message(
 // Text extraction helper
 // ---------------------------------------------------------------------------
 
+fn text_from_text_item(item: &ILinkMessageItem) -> Option<String> {
+    item.text_item
+        .as_ref()
+        .and_then(|ti| ti.text.as_ref())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            if let Some(ref_msg) = &item.ref_msg {
+                if let Some(title) = &ref_msg.title {
+                    return format!("[引用: {}]\n{}", title, s);
+                }
+            }
+            s.to_string()
+        })
+}
+
+fn text_from_voice_item(item: &ILinkMessageItem) -> Option<String> {
+    item.voice_item
+        .as_ref()
+        .and_then(|vi| vi.text.as_ref())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
+/// Parse user-visible text from ilink `item_list`.
+/// iLink occasionally omits `type` or uses values we have not mapped; still try text/voice payloads.
 fn extract_text_from_message(msg: &ILinkMessage) -> String {
     let items = match &msg.item_list {
         Some(items) if !items.is_empty() => items,
         _ => return String::new(),
     };
+    let mut fallback: Option<String> = None;
+
     for item in items {
         match item.item_type {
             Some(t) if t == MSG_ITEM_TEXT => {
-                if let Some(text) = item.text_item.as_ref().and_then(|ti| ti.text.as_ref()) {
-                    if let Some(ref_msg) = &item.ref_msg {
-                        if let Some(title) = &ref_msg.title {
-                            return format!("[引用: {}]\n{}", title, text);
-                        }
-                    }
-                    return text.clone();
+                if let Some(s) = text_from_text_item(item) {
+                    return s;
                 }
             }
             Some(t) if t == MSG_ITEM_VOICE => {
-                if let Some(text) = item.voice_item.as_ref().and_then(|vi| vi.text.as_ref()) {
-                    return text.clone();
+                if let Some(s) = text_from_voice_item(item) {
+                    return s;
                 }
             }
-            other => {
-                eprintln!("[WeChat] Unknown message item type: {:?}", other);
+            _ => {
+                if let Some(s) = text_from_text_item(item) {
+                    if fallback.is_none() {
+                        fallback = Some(s);
+                    }
+                    continue;
+                }
+                if let Some(s) = text_from_voice_item(item) {
+                    if fallback.is_none() {
+                        fallback = Some(s);
+                    }
+                    continue;
+                }
+                eprintln!("[WeChat] Unknown message item type: {:?}", item.item_type);
             }
         }
     }
-    String::new()
+
+    fallback.unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -324,7 +361,6 @@ pub struct WeChatGateway {
     #[allow(dead_code)]
     permission_approver: super::PermissionAutoApprover,
     session_queue: Arc<SessionQueue>,
-    #[allow(dead_code)]
     pending_questions: Arc<super::PendingQuestionStore>,
     /// Cache of from_user_id -> context_token for replies
     context_tokens: Arc<RwLock<HashMap<String, String>>>,
@@ -563,6 +599,10 @@ impl WeChatGateway {
                             }
                             let text = extract_text_from_message(msg);
                             if text.is_empty() {
+                                eprintln!(
+                                    "[WeChat] User message dropped: empty text after parse. from={:?}, items={:?}",
+                                    msg.from_user_id, msg.item_list
+                                );
                                 continue;
                             }
                             let sender_id = msg
@@ -584,10 +624,10 @@ impl WeChatGateway {
                                 self.persist_context_tokens().await;
                             }
 
+                            let preview: String = text.chars().take(50).collect();
                             println!(
                                 "[WeChat] Message from {}: {}...",
-                                sender_id,
-                                &text[..text.len().min(50)]
+                                sender_id, preview
                             );
 
                             // Forward to OpenCode session
@@ -631,8 +671,30 @@ impl WeChatGateway {
     async fn handle_incoming_message(&self, sender_id: &str, text: &str) -> Result<(), String> {
         let session_key = format!("wechat:dm:{}", sender_id);
 
-        // Check for slash commands first
         let trimmed = text.trim();
+
+        // Forward /answer to OpenCode pending question (must run before generic slash handler)
+        if let Some(answer_text) = super::PendingQuestionStore::parse_answer_command(trimmed) {
+            if let Some(qid) = self.pending_questions.try_answer(answer_text).await {
+                println!(
+                    "[WeChat] Question {} answered via /answer: {}",
+                    qid, answer_text
+                );
+                let _ = self
+                    .send_to_user(
+                        sender_id,
+                        &format!("✓ 已提交：{}", answer_text),
+                    )
+                    .await;
+            } else {
+                let _ = self
+                    .send_to_user(sender_id, "当前没有待回答的问题。")
+                    .await;
+            }
+            return Ok(());
+        }
+
+        // Check for slash commands first
         if !trimmed.is_empty() && trimmed.starts_with('/') {
             let reply = self.handle_slash_command(&session_key, trimmed).await;
             let _ = self.send_to_user(sender_id, &reply).await;
@@ -715,7 +777,7 @@ impl WeChatGateway {
 
         match cmd.as_str() {
             "/help" => {
-                "Available commands:\n/help - Show this help\n/model [name] - List or switch models\n/sessions [id] - List or bind sessions\n/reset - Start new session\n/stop - Stop current processing".to_string()
+                "Available commands:\n/help - Show this help\n/model [name] - List or switch models\n/sessions [id] - List or bind sessions\n/reset - Start new session\n/stop - Stop current processing\n/answer - Reply to an AI clarification (see bot message)".to_string()
             }
             "/reset" => {
                 self.session_mapping.remove_session(session_key).await;
@@ -784,19 +846,38 @@ impl WeChatGateway {
             session_id
         );
 
+        let pending_questions = Arc::clone(&self.pending_questions);
+        let sender_for_q = sender_id.to_string();
+        let gateway_for_q = self.clone();
+        let question_ctx = super::QuestionContext {
+            forwarder: Box::new(move |fq: super::ForwardedQuestion| {
+                let gateway = gateway_for_q.clone();
+                let sid = sender_for_q.clone();
+                Box::pin(async move {
+                    let text = super::format_question_message(&fq.questions, &fq.question_id);
+                    gateway.send_to_user(&sid, &text).await?;
+                    Ok(uuid::Uuid::new_v4().to_string())
+                })
+            }),
+            store: pending_questions,
+        };
+
         match super::send_message_async_with_approval(
             self.opencode_port,
             &session_id,
             parts,
             model,
-            None, // no question context for now
+            Some(question_ctx),
         )
         .await
         {
             Ok(response) => {
-                if !response.is_empty() {
-                    let _ = self.send_to_user(sender_id, &response).await;
-                }
+                let reply = if response.trim().is_empty() {
+                    "模型未返回文字内容，请稍后重试或换种说法。".to_string()
+                } else {
+                    response
+                };
+                let _ = self.send_to_user(sender_id, &reply).await;
             }
             Err(e) => {
                 eprintln!("[WeChat] Unified gateway error: {}", e);

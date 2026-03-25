@@ -636,7 +636,7 @@ fn ensure_default_permissions(workspace_path: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Ensure autoui, playwright MCP configs and skill paths are present in opencode.json.
+/// Ensure autoui, playwright, chrome-control MCP configs and skill paths are present in opencode.json.
 /// These are inherent configurations required by TeamClaw. Missing entries are added automatically;
 /// existing configurations are never modified.
 fn ensure_inherent_config(workspace_path: &str) -> Result<(), String> {
@@ -657,7 +657,7 @@ fn ensure_inherent_config(workspace_path: &str) -> Result<(), String> {
 
     let mut changed = false;
 
-    // Ensure MCP section contains playwright and autoui
+    // Ensure MCP section contains playwright, chrome-control, and autoui
     {
         let mcp = obj.entry("mcp").or_insert_with(|| serde_json::json!({}));
         let mcp_obj = mcp.as_object_mut().ok_or("mcp is not an object")?;
@@ -667,12 +667,30 @@ fn ensure_inherent_config(workspace_path: &str) -> Result<(), String> {
                 "playwright".to_string(),
                 serde_json::json!({
                     "type": "local",
-                    "enabled": true,
+                    "enabled": false,
                     "command": ["npx", "-y", "@playwright/mcp@latest"]
                 }),
             );
             changed = true;
             println!("[Config] Added inherent 'playwright' MCP config");
+        }
+
+        if !mcp_obj.contains_key("chrome-control") {
+            mcp_obj.insert(
+                "chrome-control".to_string(),
+                serde_json::json!({
+                    "type": "local",
+                    "enabled": true,
+                    "command": [
+                        "npx",
+                        "-y",
+                        "chrome-devtools-mcp@latest",
+                        "--autoConnect"
+                    ]
+                }),
+            );
+            changed = true;
+            println!("[Config] Added inherent 'chrome-control' MCP config");
         }
 
         if !mcp_obj.contains_key("autoui") {
@@ -1213,9 +1231,9 @@ async fn get_server_paths(port: u16) -> (Option<String>, Option<String>) {
     (None, None)
 }
 
-/// Stop OpenCode server
-#[tauri::command]
-pub async fn stop_opencode(state: State<'_, OpenCodeState>) -> Result<(), String> {
+/// Stop OpenCode sidecar (production) or clear running state (dev). Shared by the
+/// `stop_opencode` command and application exit (`RunEvent::Exit`).
+pub async fn shutdown_opencode(state: &OpenCodeState) -> Result<(), String> {
     let is_dev_mode = *state.is_dev_mode.lock().map_err(|e| e.to_string())?;
     let port = *state.port.lock().map_err(|e| e.to_string())?;
 
@@ -1267,6 +1285,12 @@ pub async fn stop_opencode(state: State<'_, OpenCodeState>) -> Result<(), String
     }
 
     Ok(())
+}
+
+/// Stop OpenCode server
+#[tauri::command]
+pub async fn stop_opencode(state: State<'_, OpenCodeState>) -> Result<(), String> {
+    shutdown_opencode(&state).await
 }
 
 // ─── OpenCode DB allowlist commands ──────────────────────────────────

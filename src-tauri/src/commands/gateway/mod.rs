@@ -298,7 +298,10 @@ async fn poll_for_message_with_approval_from_stream(
     let mut stream = sse_response.bytes_stream();
     let mut buffer = String::new();
     let mut new_message_id: Option<String> = None;
-    let start_time = tokio::time::Instant::now();
+    // Wall-clock deadline: timeout must apply while waiting on stream.next(), otherwise a
+    // stalled SSE connection (no chunks forever) never reaches a timeout check and blocks
+    // per-session queues (e.g. WeChat) until the process is restarted.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(900);
 
     // Track sessions (parent + children) for permission approval
     let mut tracked_sessions = HashSet::new();
@@ -310,11 +313,17 @@ async fn poll_for_message_with_approval_from_stream(
         &session_id[..session_id.len().min(8)]
     );
 
-    while let Some(chunk) = stream.next().await {
-        // Check timeout
-        if start_time.elapsed() > Duration::from_secs(900) {
-            return Err("Timeout waiting for OpenCode response".to_string());
-        }
+    loop {
+        let chunk = tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => {
+                return Err("Timeout waiting for OpenCode response".to_string());
+            }
+            chunk = stream.next() => chunk,
+        };
+
+        let Some(chunk) = chunk else {
+            return Err("SSE stream ended unexpectedly".to_string());
+        };
 
         let chunk = chunk.map_err(|e| format!("Stream error: {}", e))?;
         let text = String::from_utf8_lossy(&chunk);
@@ -523,8 +532,6 @@ async fn poll_for_message_with_approval_from_stream(
             }
         }
     }
-
-    Err("SSE stream ended unexpectedly".to_string())
 }
 
 /// Parse a single SSE event from text
