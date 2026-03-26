@@ -3,11 +3,14 @@ import { useTranslation } from "react-i18next";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { ChevronRight, File } from "lucide-react";
 
-import { copyToClipboard } from '@/lib/utils';
+import { toast } from 'sonner';
+import { copyToClipboard, isTauri } from '@/lib/utils';
 import { GitStatus } from "@/lib/git/service";
 import { useWorkspaceStore, type FileNode } from "@/stores/workspace";
 import { useGitStatus } from "@/hooks/use-git-status";
 import { useGitSettingsStore } from "@/stores/git-settings";
+import { useTeamOssStore } from "@/stores/team-oss";
+import { useTeamModeStore } from "@/stores/team-mode";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -36,6 +39,10 @@ import { TEAM_REPO_DIR, appShortName } from "@/lib/build-config";
 interface FlatTreeNode {
   node: FileNode;
   level: number;
+  /** Display name for compact folders, e.g. "src/main/java" */
+  compactName?: string;
+  /** All directory paths in a compacted chain (for collapsing all at once) */
+  compactedPaths?: string[];
 }
 
 // Filter tree nodes recursively based on filter text.
@@ -177,13 +184,46 @@ function flattenTree(
   result: FlatTreeNode[] = [],
 ): FlatTreeNode[] {
   for (const node of nodes) {
-    result.push({ node, level });
-    if (
-      node.type === "directory" &&
-      expandedPaths.has(node.path) &&
-      node.children
-    ) {
-      flattenTree(node.children, expandedPaths, level + 1, result);
+    if (node.type === "directory" && expandedPaths.has(node.path) && node.children) {
+      // Check for compact folder chain: single directory child only
+      let current = node;
+      const nameParts = [current.name];
+      const chainPaths = [current.path];
+
+      while (
+        current.children &&
+        current.children.length === 1 &&
+        current.children[0].type === "directory" &&
+        expandedPaths.has(current.children[0].path)
+      ) {
+        current = current.children[0];
+        nameParts.push(current.name);
+        chainPaths.push(current.path);
+      }
+
+      if (nameParts.length > 1) {
+        result.push({
+          node: current,
+          level,
+          compactName: nameParts.join("/"),
+          compactedPaths: chainPaths,
+        });
+      } else {
+        result.push({ node, level });
+      }
+
+      if (current.children) {
+        flattenTree(current.children, expandedPaths, level + 1, result);
+      }
+    } else {
+      result.push({ node, level });
+      if (
+        node.type === "directory" &&
+        expandedPaths.has(node.path) &&
+        node.children
+      ) {
+        flattenTree(node.children, expandedPaths, level + 1, result);
+      }
     }
   }
   return result;
@@ -225,6 +265,11 @@ export function FileTree({
   const setFocusedPath = useWorkspaceStore(s => s.setFocusedPath);
   const pushUndo = useWorkspaceStore(s => s.pushUndo);
   const refreshFileTree = useWorkspaceStore(s => s.refreshFileTree);
+  const revealFile = useWorkspaceStore(s => s.revealFile);
+  const clipboardPaths = useWorkspaceStore(s => s.clipboardPaths);
+  const clipboardMode = useWorkspaceStore(s => s.clipboardMode);
+  const setClipboard = useWorkspaceStore(s => s.setClipboard);
+  const pasteFiles = useWorkspaceStore(s => s.pasteFiles);
 
   const { gitStatuses } = useGitStatus();
   const { showGitStatus, showStatusIcons, statusColors } =
@@ -257,6 +302,8 @@ export function FileTree({
   // Drag-and-drop state
   const [dragOverPath, setDragOverPath] = useState<string | null>(null);
   const [dragSourcePath, setDragSourcePath] = useState<string | null>(null);
+  const dragOverPathRef = useRef<string | null>(null);
+  useEffect(() => { dragOverPathRef.current = dragOverPath; }, [dragOverPath]);
 
   // Pre-compute git data
   const { fileGitStatusMap, dirtyDirectories } = useMemo(() => {
@@ -282,6 +329,40 @@ export function FileTree({
 
     return { fileGitStatusMap: fileMap, dirtyDirectories: dirtyDirs };
   }, [showGitStatus, gitStatuses, workspacePath]);
+
+  // Pre-compute sync status data for team files (merge OSS and P2P sources)
+  const ossFileSyncStatusMap = useTeamOssStore(s => s.fileSyncStatusMap);
+  const p2pFileSyncStatusMap = useTeamModeStore(s => s.p2pFileSyncStatusMap);
+  const p2pConnected = useTeamModeStore(s => s.p2pConnected);
+  const fileSyncStatusMap = p2pConnected ? p2pFileSyncStatusMap : ossFileSyncStatusMap;
+  const syncDirtyDirectories = useMemo(() => {
+    const dirtyDirs = new Map<string, 'synced' | 'modified' | 'new'>();
+    if (!workspacePath) return dirtyDirs;
+
+    for (const [relPath, status] of Object.entries(fileSyncStatusMap)) {
+      if (status === 'synced') continue;
+      // Build absolute path and propagate to parent directories
+      const absPath = `${workspacePath}/${TEAM_REPO_DIR}/${relPath}`;
+      let dir = absPath.substring(0, absPath.lastIndexOf("/"));
+      while (dir && dir.length > workspacePath.length) {
+        const existing = dirtyDirs.get(dir);
+        // modified > new > synced priority
+        if (!existing || (status === 'modified' && existing === 'new')) {
+          dirtyDirs.set(dir, status);
+        }
+        dir = dir.substring(0, dir.lastIndexOf("/"));
+      }
+    }
+    return dirtyDirs;
+  }, [fileSyncStatusMap, workspacePath]);
+
+  const collapseCompacted = useCallback((paths: string[]) => {
+    const nextExpanded = new Set(useWorkspaceStore.getState().expandedPaths);
+    for (const p of paths) {
+      nextExpanded.delete(p);
+    }
+    useWorkspaceStore.setState({ expandedPaths: nextExpanded });
+  }, []);
 
   // Context menu action handlers
   const handleNewFile = useCallback(
@@ -493,6 +574,27 @@ export function FileTree({
     [workspacePath],
   );
 
+  // ── Clipboard handlers for context menu ──
+  const handleCut = useCallback((paths: string[]) => {
+    setClipboard(paths, 'cut');
+    toast.success(t('fileExplorer.cut', 'Cut {{count}} item(s)', { count: paths.length }));
+  }, [setClipboard, t]);
+
+  const handleCopy = useCallback((paths: string[]) => {
+    setClipboard(paths, 'copy');
+    toast.success(t('fileExplorer.copied', 'Copied {{count}} item(s)', { count: paths.length }));
+  }, [setClipboard, t]);
+
+  const handlePaste = useCallback(async (targetDir: string) => {
+    const success = await pasteFiles(targetDir);
+    if (success) {
+      toast.success(t('fileExplorer.pasted', 'Pasted'));
+      await expandDirectory(targetDir);
+    } else {
+      toast.error(t('fileExplorer.pasteFailed', 'Paste failed'));
+    }
+  }, [pasteFiles, expandDirectory, t]);
+
   // ── Drag and drop handlers ──
   const handleDragStart = useCallback(
     (e: React.DragEvent, path: string) => {
@@ -607,10 +709,56 @@ export function FileTree({
 
   // ── Keyboard navigation ──
   const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent) => {
+    async (e: React.KeyboardEvent) => {
       if (!flatNodes.length) return;
       // Don't handle keys when renaming
       if (renamingPath || creatingIn) return;
+
+      // Clipboard shortcuts
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey) {
+        if (e.key === 'c') {
+          e.preventDefault();
+          const paths = selectedFiles.length > 0 ? selectedFiles : (focusedPath ? [focusedPath] : []);
+          if (paths.length > 0) {
+            setClipboard(paths, 'copy');
+            toast.success(t('fileExplorer.copied', 'Copied {{count}} item(s)', { count: paths.length }));
+          }
+          return;
+        }
+        if (e.key === 'x') {
+          e.preventDefault();
+          const paths = selectedFiles.length > 0 ? selectedFiles : (focusedPath ? [focusedPath] : []);
+          if (paths.length > 0) {
+            setClipboard(paths, 'cut');
+            toast.success(t('fileExplorer.cut', 'Cut {{count}} item(s)', { count: paths.length }));
+          }
+          return;
+        }
+        if (e.key === 'v') {
+          e.preventDefault();
+          if (clipboardPaths.length > 0 && clipboardMode) {
+            let targetDir = workspacePath;
+            if (focusedPath) {
+              const node = flatNodes.find(n => n.node.path === focusedPath);
+              if (node?.node.type === 'directory') {
+                targetDir = focusedPath;
+              } else {
+                targetDir = focusedPath.substring(0, focusedPath.lastIndexOf('/'));
+              }
+            }
+            if (targetDir) {
+              const success = await pasteFiles(targetDir);
+              if (success) {
+                toast.success(t('fileExplorer.pasted', 'Pasted'));
+                await expandDirectory(targetDir);
+              } else {
+                toast.error(t('fileExplorer.pasteFailed', 'Paste failed'));
+              }
+            }
+          }
+          return;
+        }
+      }
 
       const currentIndex = flatNodes.findIndex(
         (n) => n.node.path === focusedPath,
@@ -654,9 +802,13 @@ export function FileTree({
         case "ArrowLeft": {
           e.preventDefault();
           if (currentIndex === -1) break;
-          const node = flatNodes[currentIndex].node;
+          const { node, compactedPaths } = flatNodes[currentIndex];
           if (node.type === "directory" && effectiveExpandedPaths.has(node.path)) {
-            collapseDirectory(node.path);
+            if (compactedPaths && compactedPaths.length > 1) {
+              collapseCompacted(compactedPaths);
+            } else {
+              collapseDirectory(node.path);
+            }
           } else {
             // Navigate to parent directory
             const parentPath = node.path.substring(0, node.path.lastIndexOf("/"));
@@ -673,15 +825,19 @@ export function FileTree({
         case "Enter": {
           e.preventDefault();
           if (currentIndex === -1) break;
-          const node = flatNodes[currentIndex].node;
-          if (node.type === "directory") {
-            if (effectiveExpandedPaths.has(node.path)) {
-              collapseDirectory(node.path);
+          const entryNode = flatNodes[currentIndex];
+          if (entryNode.node.type === "directory") {
+            if (effectiveExpandedPaths.has(entryNode.node.path)) {
+              if (entryNode.compactedPaths && entryNode.compactedPaths.length > 1) {
+                collapseCompacted(entryNode.compactedPaths);
+              } else {
+                collapseDirectory(entryNode.node.path);
+              }
             } else {
-              expandDirectory(node.path);
+              expandDirectory(entryNode.node.path);
             }
           } else {
-            selectFile(node.path);
+            selectFile(entryNode.node.path);
           }
           break;
         }
@@ -735,11 +891,18 @@ export function FileTree({
       creatingIn,
       effectiveExpandedPaths,
       workspacePath,
+      selectedFiles,
       setFocusedPath,
       expandDirectory,
       collapseDirectory,
+      collapseCompacted,
       selectFile,
       handleDelete,
+      clipboardPaths,
+      clipboardMode,
+      setClipboard,
+      pasteFiles,
+      t,
     ],
   );
 
@@ -755,6 +918,104 @@ export function FileTree({
     }, 100);
     return () => clearTimeout(timer);
   }, [selectedFile]);
+
+  // Auto-reveal active file in tree when tab changes
+  // Dynamic import to avoid circular dependency (workspace ↔ tabs)
+  useEffect(() => {
+    let cancelled = false;
+    let unsubscribe: (() => void) | undefined;
+    import('@/stores/tabs').then(({ useTabsStore }) => {
+      if (cancelled) return;
+      let prevActiveTabId = useTabsStore.getState().activeTabId;
+      unsubscribe = useTabsStore.subscribe((state) => {
+        if (state.activeTabId === prevActiveTabId) return;
+        prevActiveTabId = state.activeTabId;
+        if (!state.activeTabId) {
+          useWorkspaceStore.setState({ selectedFile: null, selectedFiles: [], focusedPath: null });
+          return;
+        }
+        const tab = state.tabs.find(t => t.id === state.activeTabId);
+        if (tab?.type === 'file' && tab.target) {
+          useWorkspaceStore.setState({ selectedFile: tab.target, selectedFiles: [tab.target] });
+          revealFile(tab.target).catch(() => {});
+        }
+      });
+    });
+    return () => { cancelled = true; unsubscribe?.(); };
+  }, [revealFile]);
+
+  // Listen for Tauri native drag-drop events (external file drops from OS)
+  // Use flatNodesRef so the drag-over handler can resolve file paths to parent dirs
+  const flatNodesRef = useRef(flatNodes);
+  useEffect(() => { flatNodesRef.current = flatNodes; }, [flatNodes]);
+
+  useEffect(() => {
+    if (!isTauri() || !workspacePath) return;
+    let cancelled = false;
+    const unlisteners: (() => void)[] = [];
+
+    import('@tauri-apps/api/event').then(async ({ listen }) => {
+      if (cancelled) return;
+
+      // Handle file drop
+      unlisteners.push(await listen<{ paths: string[]; position: { x: number; y: number } }>(
+        'tauri://drag-drop',
+        async (event) => {
+          const paths = event.payload.paths;
+          if (!paths || paths.length === 0) return;
+
+          const targetDir = dragOverPathRef.current || workspacePath;
+
+          const { copyExternalFiles } = await import('./file-tree-operations');
+          const success = await copyExternalFiles(paths, targetDir);
+          if (success) {
+            toast.success(t('fileExplorer.externalDropped', 'Copied {{count}} file(s)', { count: paths.length }));
+            await refreshFileTree();
+            if (targetDir !== workspacePath) {
+              await expandDirectory(targetDir);
+            }
+          } else {
+            toast.error(t('fileExplorer.externalDropFailed', 'Failed to copy files'));
+          }
+          setDragOverPath(null);
+        },
+      ));
+      if (cancelled) { unlisteners.forEach(fn => fn()); return; }
+
+      // Highlight hovered directory during external drag
+      unlisteners.push(await listen<{ paths: string[]; position: { x: number; y: number } }>(
+        'tauri://drag-over',
+        (event) => {
+          const el = document.elementFromPoint(event.payload.position.x, event.payload.position.y);
+          const treeItem = el?.closest('[data-path]') as HTMLElement | null;
+          if (treeItem) {
+            const path = treeItem.getAttribute('data-path');
+            if (path) {
+              // Resolve to parent directory if hovering over a file
+              const node = flatNodesRef.current.find(fn => fn.node.path === path);
+              if (node && node.node.type === 'file') {
+                const parentDir = path.substring(0, path.lastIndexOf('/'));
+                setDragOverPath(parentDir || workspacePath);
+              } else {
+                setDragOverPath(path);
+              }
+            }
+          } else {
+            setDragOverPath(null);
+          }
+        },
+      ));
+      if (cancelled) { unlisteners.forEach(fn => fn()); return; }
+
+      // Clear highlight when drag leaves window
+      unlisteners.push(await listen('tauri://drag-leave', () => {
+        setDragOverPath(null);
+      }));
+      if (cancelled) { unlisteners.forEach(fn => fn()); return; }
+    });
+
+    return () => { cancelled = true; unlisteners.forEach(fn => fn()); };
+  }, [workspacePath, refreshFileTree, expandDirectory, t]);
 
   if (fileTree.length === 0) {
     return (
@@ -790,9 +1051,12 @@ export function FileTree({
       1
     : 0;
 
-  const buildItemProps = (node: FileNode, level: number) => ({
+  const buildItemProps = (node: FileNode, level: number, compactName?: string, compactedPaths?: string[]) => ({
     node,
     level,
+    compactName,
+    compactedPaths,
+    onCollapseCompacted: collapseCompacted,
     isSelected: selectedFilesSet.has(node.path) || selectedFile === node.path,
     isFocused: focusedPath === node.path,
     isExpanded: effectiveExpandedPaths.has(node.path),
@@ -810,6 +1074,17 @@ export function FileTree({
     isRenaming: renamingPath === node.path,
     isDragOver: dragOverPath === node.path,
     isTeamClawTeam: node.name === TEAM_REPO_DIR && node.type === "directory" && level === 0,
+    syncStatus: (() => {
+      if (!node.path.includes(`/${TEAM_REPO_DIR}/`)) return null;
+      if (node.type === 'directory') {
+        return syncDirtyDirectories.get(node.path) ?? null;
+      }
+      // Extract relative path within teamclaw-team/
+      const teamDirPrefix = `${workspacePath}/${TEAM_REPO_DIR}/`;
+      if (!node.path.startsWith(teamDirPrefix)) return null;
+      const relPath = node.path.slice(teamDirPrefix.length);
+      return fileSyncStatusMap[relPath] ?? null;
+    })(),
     onSelectFile: selectFile,
     onSelectFileRange: selectFileRange,
     onToggleFileSelection: toggleFileSelection,
@@ -831,13 +1106,19 @@ export function FileTree({
     onDragOver: handleDragOver,
     onDragLeave: handleDragLeave,
     onDrop: handleDrop,
+    onCut: handleCut,
+    onCopy: handleCopy,
+    onPaste: handlePaste,
+    hasClipboard: clipboardPaths.length > 0,
+    isClipboardCut: clipboardMode === 'cut',
+    clipboardPaths,
   });
 
   const treeContent = !useVirtual ? (
     <div className="py-1">
-      {flatNodes.map(({ node, level }, index) => (
+      {flatNodes.map(({ node, level, compactName, compactedPaths }, index) => (
         <React.Fragment key={node.path}>
-          <FileTreeItem {...buildItemProps(node, level)} />
+          <FileTreeItem {...buildItemProps(node, level, compactName, compactedPaths)} />
           {creatingIn && index === creatingIndex - 1 && (
             <InlineInput
               defaultValue={
@@ -868,7 +1149,7 @@ export function FileTree({
         }}
       >
         {virtualizer.getVirtualItems().map((virtualRow) => {
-          const { node, level } = flatNodes[virtualRow.index];
+          const { node, level, compactName, compactedPaths } = flatNodes[virtualRow.index];
           return (
             <div
               key={node.path}
@@ -881,7 +1162,7 @@ export function FileTree({
                 transform: `translateY(${virtualRow.start}px)`,
               }}
             >
-              <FileTreeItem {...buildItemProps(node, level)} />
+              <FileTreeItem {...buildItemProps(node, level, compactName, compactedPaths)} />
             </div>
           );
         })}

@@ -65,6 +65,12 @@ interface PendingApplication {
   appliedAt: string
 }
 
+interface FileSyncStatus {
+  path: string
+  docType: string
+  status: 'synced' | 'modified' | 'new'
+}
+
 interface TeamOssState {
   // State
   configured: boolean // local config exists (oss.enabled), true even when offline
@@ -76,6 +82,7 @@ interface TeamOssState {
   error: string | null
   _unlisten: UnlistenFn | null
   pendingApplication: PendingApplication | null
+  fileSyncStatusMap: Record<string, 'synced' | 'modified' | 'new'>
 
   // Actions
   initialize: (workspacePath: string) => Promise<void>
@@ -108,6 +115,7 @@ interface TeamOssState {
   loadPendingApplication: (workspacePath: string) => Promise<void>
   cancelApplication: (workspacePath: string) => Promise<void>
   cleanup: () => void
+  loadFileSyncStatus: () => Promise<void>
 }
 
 export const useTeamOssStore = create<TeamOssState>((set, get) => ({
@@ -121,18 +129,41 @@ export const useTeamOssStore = create<TeamOssState>((set, get) => ({
   error: null,
   _unlisten: null,
   pendingApplication: null,
+  fileSyncStatusMap: {},
 
   initialize: async (workspacePath) => {
     try {
       // Listen for sync status events from Rust backend
-      const unlisten = await listen<SyncStatus>('oss-sync-status', (event) => {
+      const unlistenSync = await listen<SyncStatus>('oss-sync-status', (event) => {
         set({
           syncStatus: event.payload,
           connected: event.payload.connected,
           syncing: event.payload.syncing,
         })
+        // Refresh per-file sync status after each sync cycle
+        if (!event.payload.syncing) {
+          get().loadFileSyncStatus()
+        }
       })
-      set({ _unlisten: unlisten })
+
+      // Refresh per-file sync status when teamclaw-team/ files change locally,
+      // so the "modified" (orange) state is visible before the next sync poll.
+      let fileChangeTimer: ReturnType<typeof setTimeout> | null = null
+      const unlistenFileChange = await listen<{ path: string; kind: string }>('file-change', (event) => {
+        if (!event.payload.path.includes('teamclaw-team/')) return
+        if (fileChangeTimer) clearTimeout(fileChangeTimer)
+        fileChangeTimer = setTimeout(() => {
+          get().loadFileSyncStatus()
+        }, 1500)
+      })
+
+      set({
+        _unlisten: () => {
+          unlistenSync()
+          unlistenFileChange()
+          if (fileChangeTimer) clearTimeout(fileChangeTimer)
+        },
+      })
 
       const config = await invoke<OssTeamConfig | null>('oss_get_team_config', { workspacePath })
       if (config?.enabled) {
@@ -320,6 +351,20 @@ export const useTeamOssStore = create<TeamOssState>((set, get) => ({
       members: [],
       error: null,
       pendingApplication: null,
+      fileSyncStatusMap: {},
     })
+  },
+
+  loadFileSyncStatus: async () => {
+    try {
+      const statuses = await invoke<FileSyncStatus[]>('oss_get_files_sync_status', {})
+      const map: Record<string, 'synced' | 'modified' | 'new'> = {}
+      for (const s of statuses) {
+        map[s.path] = s.status
+      }
+      set({ fileSyncStatusMap: map })
+    } catch (e) {
+      console.debug('[team-oss] loadFileSyncStatus skipped:', e)
+    }
   },
 }))

@@ -12,14 +12,18 @@ import {
   FolderPlus,
   Trash2,
   Copy,
+  Scissors,
+  ClipboardPaste,
   ExternalLink,
   MessageSquarePlus,
   AppWindow,
+  History,
 } from "lucide-react";
 
 import { cn } from '@/lib/utils';
 import { TEAM_REPO_DIR } from '@/lib/build-config';
 import { useTeamModeStore } from '@/stores/team-mode';
+import { useTabsStore } from '@/stores/tabs';
 import { getFileIcon } from '@/lib/file-icons';
 import { getGitStatusIndicator, getGitStatusTextColor } from '@/lib/git-status-utils';
 import { GitStatus } from "@/lib/git/service";
@@ -32,6 +36,14 @@ import {
   ContextMenuSeparator,
   ContextMenuShortcut,
 } from "@/components/ui/context-menu";
+
+function getSyncStatusTextColor(status: 'synced' | 'modified' | 'new'): string {
+  switch (status) {
+    case 'synced': return 'text-green-600'
+    case 'modified': return 'text-orange-500'
+    case 'new': return 'text-gray-400'
+  }
+}
 
 // Inline editing input component
 export function InlineInput({
@@ -148,6 +160,11 @@ export interface FileTreeItemProps {
   isDragOver: boolean;
   /** Whether this is the root teamclaw-team directory (for visual styling) */
   isTeamClawTeam?: boolean;
+  /** OSS sync status for team files */
+  syncStatus?: 'synced' | 'modified' | 'new' | null;
+  compactName?: string;
+  compactedPaths?: string[];
+  onCollapseCompacted: (paths: string[]) => void;
   onSelectFile: (path: string) => void;
   onSelectFileRange: (path: string) => void; // Shift+Click range selection
   onToggleFileSelection: (path: string) => void; // Ctrl/Cmd+Click toggle
@@ -169,6 +186,12 @@ export interface FileTreeItemProps {
   onDragOver: (e: React.DragEvent, path: string) => void;
   onDragLeave: (e: React.DragEvent) => void;
   onDrop: (e: React.DragEvent, targetPath: string) => void;
+  onCut: (paths: string[]) => void;
+  onCopy: (paths: string[]) => void;
+  onPaste: (targetDir: string) => void;
+  hasClipboard: boolean;
+  isClipboardCut: boolean;
+  clipboardPaths: string[];
 }
 
 export const FileTreeItem = React.memo(function FileTreeItem({
@@ -185,6 +208,7 @@ export const FileTreeItem = React.memo(function FileTreeItem({
   isRenaming,
   isDragOver,
   isTeamClawTeam,
+  syncStatus,
   onSelectFile,
   onSelectFileRange,
   onToggleFileSelection,
@@ -206,17 +230,32 @@ export const FileTreeItem = React.memo(function FileTreeItem({
   onDragOver,
   onDragLeave,
   onDrop,
+  compactName,
+  compactedPaths,
+  onCollapseCompacted,
+  onCut,
+  onCopy,
+  onPaste,
+  hasClipboard,
+  isClipboardCut,
+  clipboardPaths,
 }: FileTreeItemProps) {
   const { t } = useTranslation();
   const isDirectory = node.type === "directory";
   const myRole = useTeamModeStore((s) => s.myRole)
   const isTeamFile = node.path.includes(`/${TEAM_REPO_DIR}/`)
   const isViewerRestricted = isTeamFile && myRole === 'viewer'
+  const isCutTarget = clipboardPaths?.includes(node.path) && isClipboardCut;
+  const displayName = compactName || node.name;
 
   const handleClick = (e: React.MouseEvent) => {
     if (isDirectory) {
       if (isExpanded) {
-        onCollapseDirectory(node.path);
+        if (compactedPaths && compactedPaths.length > 1) {
+          onCollapseCompacted(compactedPaths);
+        } else {
+          onCollapseDirectory(node.path);
+        }
       } else {
         onExpandDirectory(node.path);
       }
@@ -277,6 +316,7 @@ export const FileTreeItem = React.memo(function FileTreeItem({
           "bg-primary/20 ring-2 ring-primary/40",
         hasGitChanges && !isSelected && !isFocused && "git-status-changed",
         isTeamClawTeam && !isSelected && !isFocused && "border-l border-blue-500/40",
+        isCutTarget && "opacity-50",
       )}
       style={{ paddingLeft: `${level * 12 + 8}px` }}
     >
@@ -299,7 +339,9 @@ export const FileTreeItem = React.memo(function FileTreeItem({
             "h-4 w-4 shrink-0",
             gitStatus
               ? getGitStatusTextColor(gitStatus, statusColors)
-              : fileIconColor,
+              : syncStatus
+                ? getSyncStatusTextColor(syncStatus)
+                : fileIconColor,
           )}
         />
       )}
@@ -312,11 +354,13 @@ export const FileTreeItem = React.memo(function FileTreeItem({
         className={cn(
           "pr-2 flex-1",
           gitStatus && getGitStatusTextColor(gitStatus, statusColors),
+          !gitStatus && syncStatus && getSyncStatusTextColor(syncStatus),
           gitStatus === GitStatus.DELETED && "line-through opacity-70",
           hasGitChanges && isDirectory && "text-amber-500",
+          !hasGitChanges && isDirectory && syncStatus && getSyncStatusTextColor(syncStatus),
         )}
       >
-        {node.name}
+        {displayName}
       </span>
 
       {hasGitChanges &&
@@ -385,6 +429,40 @@ export const FileTreeItem = React.memo(function FileTreeItem({
           <Copy className="h-4 w-4" />
           {t("fileExplorer.copyRelativePath", "Copy Relative Path")}
         </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem onClick={() => onCopy([node.path])}>
+          <Copy className="h-4 w-4" />
+          {t("fileExplorer.copyFile", "Copy")}
+          <ContextMenuShortcut>⌘C</ContextMenuShortcut>
+        </ContextMenuItem>
+        {!isViewerRestricted && (
+          <ContextMenuItem onClick={() => onCut([node.path])}>
+            <Scissors className="h-4 w-4" />
+            {t("fileExplorer.cutFile", "Cut")}
+            <ContextMenuShortcut>⌘X</ContextMenuShortcut>
+          </ContextMenuItem>
+        )}
+        {!isViewerRestricted && hasClipboard && isDirectory && (
+          <ContextMenuItem onClick={() => onPaste(node.path)}>
+            <ClipboardPaste className="h-4 w-4" />
+            {t("fileExplorer.pasteFile", "Paste")}
+            <ContextMenuShortcut>⌘V</ContextMenuShortcut>
+          </ContextMenuItem>
+        )}
+        {!isDirectory && (
+          <ContextMenuItem
+            onClick={() => {
+              useTabsStore.getState().openTab({
+                type: "native",
+                target: "version-history",
+                label: "版本历史",
+              })
+            }}
+          >
+            <History className="h-4 w-4" />
+            版本历史
+          </ContextMenuItem>
+        )}
         <ContextMenuSeparator />
         {!isViewerRestricted && (
           <ContextMenuItem onClick={() => onRename(node.path)}>

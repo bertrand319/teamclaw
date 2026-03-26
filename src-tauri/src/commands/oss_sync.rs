@@ -1,5 +1,6 @@
 use crate::commands::oss_types::*;
 use crate::commands::team::TEAM_REPO_DIR;
+use crate::commands::version_types::MAX_VERSIONS;
 use crate::commands::TEAMCLAW_DIR;
 
 use aws_sdk_s3::primitives::ByteStream;
@@ -395,6 +396,79 @@ impl OssSyncManager {
         }
     }
 
+    /// Archive the current state of a file entry into its `versions` LoroList
+    /// before overwriting or deleting it. Trims the list to MAX_VERSIONS.
+    fn archive_current_version(files_map: &loro::LoroMap, path: &str) -> Result<(), String> {
+        // Only archive if the entry already exists with content
+        let entry_map = match files_map.get(path) {
+            Some(loro::ValueOrContainer::Container(loro::Container::Map(m))) => m,
+            _ => return Ok(()), // No existing entry — nothing to archive
+        };
+
+        let deep = entry_map.get_deep_value();
+        let entry = match deep {
+            loro::LoroValue::Map(ref m) => m.clone(),
+            _ => return Ok(()),
+        };
+
+        // Require at least a content field to be worth archiving
+        let content = match entry.get("content") {
+            Some(loro::LoroValue::String(s)) => s.as_ref().to_string(),
+            _ => return Ok(()),
+        };
+        let hash = match entry.get("hash") {
+            Some(loro::LoroValue::String(s)) => s.as_ref().to_string(),
+            _ => String::new(),
+        };
+        let updated_by = match entry.get("updatedBy") {
+            Some(loro::LoroValue::String(s)) => s.as_ref().to_string(),
+            _ => String::new(),
+        };
+        let updated_at = match entry.get("updatedAt") {
+            Some(loro::LoroValue::String(s)) => s.as_ref().to_string(),
+            _ => String::new(),
+        };
+        let deleted = match entry.get("deleted") {
+            Some(loro::LoroValue::Bool(b)) => *b,
+            _ => false,
+        };
+
+        // Get or create the versions list
+        let versions = entry_map
+            .get_or_create_container("versions", loro::LoroList::new())
+            .map_err(|e| format!("Failed to get/create versions list for {path}: {e}"))?;
+
+        // Push a snapshot map into the versions list
+        let snapshot = versions
+            .push_container(loro::LoroMap::new())
+            .map_err(|e| format!("Failed to push version snapshot for {path}: {e}"))?;
+
+        snapshot
+            .insert("content", content.as_str())
+            .map_err(|e| format!("Failed to set version content for {path}: {e}"))?;
+        snapshot
+            .insert("hash", hash.as_str())
+            .map_err(|e| format!("Failed to set version hash for {path}: {e}"))?;
+        snapshot
+            .insert("updatedBy", updated_by.as_str())
+            .map_err(|e| format!("Failed to set version updatedBy for {path}: {e}"))?;
+        snapshot
+            .insert("updatedAt", updated_at.as_str())
+            .map_err(|e| format!("Failed to set version updatedAt for {path}: {e}"))?;
+        snapshot
+            .insert("deleted", deleted)
+            .map_err(|e| format!("Failed to set version deleted for {path}: {e}"))?;
+
+        // Trim to MAX_VERSIONS (oldest first, so delete from index 0)
+        while versions.len() > MAX_VERSIONS {
+            versions
+                .delete(0, 1)
+                .map_err(|e| format!("Failed to trim versions list for {path}: {e}"))?;
+        }
+
+        Ok(())
+    }
+
     fn scan_local_files(dir: &Path) -> Result<HashMap<String, Vec<u8>>, String> {
         let mut result = HashMap::new();
 
@@ -483,6 +557,64 @@ impl OssSyncManager {
         }
 
         changed
+    }
+
+    /// Compare local files against the Loro doc to determine sync status.
+    /// Only reports on files that exist locally — remote-only files (added by
+    /// teammates but not yet pulled to disk) are not included because the file
+    /// tree only displays local files.
+    pub fn get_files_sync_status(
+        &self,
+        doc_type: Option<DocType>,
+    ) -> Result<Vec<FileSyncStatus>, String> {
+        let doc_types = match doc_type {
+            Some(dt) => vec![dt],
+            None => DocType::all().to_vec(),
+        };
+
+        let mut result = Vec::new();
+
+        for dt in doc_types {
+            let dir = self.team_dir.join(dt.dir_name());
+            let local_files = Self::scan_local_files(&dir)?;
+            let doc = self.get_doc(dt);
+            let files_map = doc.get_map("files");
+
+            for (path, content) in &local_files {
+                let local_hash = Self::compute_hash(content);
+
+                let status = match files_map.get(path) {
+                    Some(loro::ValueOrContainer::Container(loro::Container::Map(entry_map))) => {
+                        let deep = entry_map.get_deep_value();
+                        if let loro::LoroValue::Map(entry) = deep {
+                            let deleted = match entry.get("deleted") {
+                                Some(loro::LoroValue::Bool(b)) => *b,
+                                _ => false,
+                            };
+                            if deleted {
+                                SyncFileStatus::New
+                            } else {
+                                match entry.get("hash") {
+                                    Some(loro::LoroValue::String(h)) if h.as_ref() == local_hash => SyncFileStatus::Synced,
+                                    _ => SyncFileStatus::Modified,
+                                }
+                            }
+                        } else {
+                            SyncFileStatus::New
+                        }
+                    }
+                    _ => SyncFileStatus::New,
+                };
+
+                result.push(FileSyncStatus {
+                    path: format!("{}/{}", dt.dir_name(), path),
+                    doc_type: dt.path().to_string(),
+                    status,
+                });
+            }
+        }
+
+        Ok(result)
     }
 
     fn write_doc_to_disk(&self, doc_type: DocType) -> Result<(), String> {
@@ -634,6 +766,9 @@ impl OssSyncManager {
             // Update changed files
             for path in &changed {
                 if let Some(content) = local_files.get(path) {
+                    // Archive the current version before overwriting
+                    Self::archive_current_version(&files_map, path)?;
+
                     let hash = Self::compute_hash(content);
                     let content_str = String::from_utf8_lossy(content).to_string();
 
@@ -668,6 +803,9 @@ impl OssSyncManager {
                             _ => false,
                         };
                         if !deleted && !local_files.contains_key(path.as_str()) {
+                            // Archive the current version before marking deleted
+                            Self::archive_current_version(&files_map, path.as_str())?;
+
                             let entry_map = files_map
                                 .get_or_create_container(path, loro::LoroMap::new())
                                 .map_err(|e| format!("Failed to get map entry for {path}: {e}"))?;
@@ -787,6 +925,220 @@ impl OssSyncManager {
         }
 
         self.connected = true;
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Version History Operations
+    // -----------------------------------------------------------------------
+
+    /// List all archived versions for a file, returned in newest-first order.
+    pub fn list_file_versions(
+        &self,
+        doc_type: DocType,
+        file_path: &str,
+    ) -> Vec<crate::commands::version_types::FileVersion> {
+        let doc = self.get_doc(doc_type);
+        let files_map = doc.get_map("files");
+
+        let entry_map = match files_map.get(file_path) {
+            Some(loro::ValueOrContainer::Container(loro::Container::Map(m))) => m,
+            _ => return Vec::new(),
+        };
+
+        let deep = entry_map.get_deep_value();
+        let entry = match deep {
+            loro::LoroValue::Map(ref m) => m.clone(),
+            _ => return Vec::new(),
+        };
+
+        let versions_value = match entry.get("versions") {
+            Some(v) => v.clone(),
+            None => return Vec::new(),
+        };
+
+        let versions_list = match versions_value {
+            loro::LoroValue::List(list) => list,
+            _ => return Vec::new(),
+        };
+
+        let mut result: Vec<crate::commands::version_types::FileVersion> = versions_list
+            .iter()
+            .enumerate()
+            .filter_map(|(i, v)| {
+                if let loro::LoroValue::Map(m) = v {
+                    let content = match m.get("content") {
+                        Some(loro::LoroValue::String(s)) => s.as_ref().to_string(),
+                        _ => return None,
+                    };
+                    let hash = match m.get("hash") {
+                        Some(loro::LoroValue::String(s)) => s.as_ref().to_string(),
+                        _ => String::new(),
+                    };
+                    let updated_by = match m.get("updatedBy") {
+                        Some(loro::LoroValue::String(s)) => s.as_ref().to_string(),
+                        _ => String::new(),
+                    };
+                    let updated_at = match m.get("updatedAt") {
+                        Some(loro::LoroValue::String(s)) => s.as_ref().to_string(),
+                        _ => String::new(),
+                    };
+                    let deleted = match m.get("deleted") {
+                        Some(loro::LoroValue::Bool(b)) => *b,
+                        _ => false,
+                    };
+                    Some(crate::commands::version_types::FileVersion {
+                        index: i as u32,
+                        content,
+                        hash,
+                        updated_by,
+                        updated_at,
+                        deleted,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Return in newest-first order
+        result.reverse();
+        result
+    }
+
+    /// List all files across one or all doc types that have non-empty version history,
+    /// sorted by latest_update_at descending.
+    pub fn list_all_versioned_files(
+        &self,
+        doc_type: Option<DocType>,
+    ) -> Vec<crate::commands::version_types::VersionedFileInfo> {
+        let doc_types: Vec<DocType> = match doc_type {
+            Some(dt) => vec![dt],
+            None => DocType::all().to_vec(),
+        };
+
+        let mut result = Vec::new();
+
+        for dt in doc_types {
+            let doc = self.get_doc(dt);
+            let files_map = doc.get_map("files");
+            let map_value = files_map.get_deep_value();
+
+            if let loro::LoroValue::Map(entries) = map_value {
+                for (path, value) in entries.iter() {
+                    if let loro::LoroValue::Map(entry) = value {
+                        // Check if versions list is non-empty
+                        let version_count = match entry.get("versions") {
+                            Some(loro::LoroValue::List(list)) => list.len() as u32,
+                            _ => 0,
+                        };
+
+                        if version_count == 0 {
+                            continue;
+                        }
+
+                        let current_deleted = match entry.get("deleted") {
+                            Some(loro::LoroValue::Bool(b)) => *b,
+                            _ => false,
+                        };
+                        let latest_update_at = match entry.get("updatedAt") {
+                            Some(loro::LoroValue::String(s)) => s.as_ref().to_string(),
+                            _ => String::new(),
+                        };
+                        let latest_update_by = match entry.get("updatedBy") {
+                            Some(loro::LoroValue::String(s)) => s.as_ref().to_string(),
+                            _ => String::new(),
+                        };
+
+                        result.push(crate::commands::version_types::VersionedFileInfo {
+                            path: path.to_string(),
+                            doc_type: dt.path().to_string(),
+                            current_deleted,
+                            version_count,
+                            latest_update_at,
+                            latest_update_by,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Sort by latest_update_at descending
+        result.sort_by(|a, b| b.latest_update_at.cmp(&a.latest_update_at));
+        result
+    }
+
+    /// Restore a specific archived version of a file to both disk and the Loro
+    /// document so that the next sync cycle does not overwrite it.
+    pub fn restore_file_version(
+        &mut self,
+        doc_type: DocType,
+        file_path: &str,
+        version_index: u32,
+    ) -> Result<(), String> {
+        let versions = self.list_file_versions(doc_type, file_path);
+
+        let version = versions
+            .into_iter()
+            .find(|v| v.index == version_index)
+            .ok_or_else(|| {
+                format!(
+                    "Version index {} not found for {file_path}",
+                    version_index
+                )
+            })?;
+
+        let restored_content = version.content.clone();
+
+        // 1. Write the restored content to disk
+        let dest = self
+            .team_dir
+            .join(doc_type.dir_name())
+            .join(file_path);
+
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create parent directories for {}: {e}", dest.display()))?;
+        }
+
+        std::fs::write(&dest, restored_content.as_bytes())
+            .map_err(|e| format!("Failed to write restored file {}: {e}", dest.display()))?;
+
+        // 2. Update the Loro document so the restored content is the current
+        //    version and the previous current version is archived.
+        let doc = self.get_doc_mut(doc_type);
+        let files_map = doc.get_map("files");
+
+        Self::archive_current_version(&files_map, file_path)?;
+
+        let hash = Self::compute_hash(restored_content.as_bytes());
+        let now = chrono::Utc::now().to_rfc3339();
+        let node_id = self.node_id.clone();
+
+        let entry_map = files_map
+            .get_or_create_container(file_path, loro::LoroMap::new())
+            .map_err(|e| format!("Failed to get/create map entry for {file_path}: {e}"))?;
+        entry_map
+            .insert("content", restored_content.as_str())
+            .map_err(|e| format!("Failed to set content for {file_path}: {e}"))?;
+        entry_map
+            .insert("hash", hash.as_str())
+            .map_err(|e| format!("Failed to set hash for {file_path}: {e}"))?;
+        entry_map
+            .insert("deleted", false)
+            .map_err(|e| format!("Failed to set deleted for {file_path}: {e}"))?;
+        entry_map
+            .insert("updatedBy", node_id.as_str())
+            .map_err(|e| format!("Failed to set updatedBy for {file_path}: {e}"))?;
+        entry_map
+            .insert("updatedAt", now.as_str())
+            .map_err(|e| format!("Failed to set updatedAt for {file_path}: {e}"))?;
+
+        info!(
+            "Restored version {} of {:?}/{file_path} to disk and Loro doc",
+            version_index, doc_type
+        );
+
         Ok(())
     }
 

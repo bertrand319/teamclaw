@@ -37,13 +37,24 @@ vi.mock('@/stores/workspace', () => ({
         pushUndo: vi.fn(),
         refreshFileTree: vi.fn().mockResolvedValue(undefined),
         clearSelection: vi.fn(),
+        clipboardPaths: [],
+        clipboardMode: null,
+        setClipboard: vi.fn(),
+        pasteFiles: vi.fn().mockResolvedValue(false),
+        revealFile: vi.fn().mockResolvedValue(undefined),
       }),
     {
       getState: () => ({
         selectedFiles: [],
         fileTree: mockFileTree,
         clearSelection: vi.fn(),
+        setClipboard: vi.fn(),
+        clipboardPaths: [],
+        clipboardMode: null,
+        pasteFiles: vi.fn().mockResolvedValue(false),
       }),
+      subscribe: vi.fn(() => vi.fn()),
+      setState: vi.fn(),
     },
   ),
 }))
@@ -60,6 +71,10 @@ vi.mock('@/stores/git-settings', () => ({
   }),
 }))
 
+vi.mock('sonner', () => ({
+  toast: { success: vi.fn(), error: vi.fn() },
+}))
+
 vi.mock('@/lib/utils', () => ({
   isTauri: () => false,
   cn: (...args: unknown[]) => args.filter(Boolean).join(' '),
@@ -68,9 +83,9 @@ vi.mock('@/lib/utils', () => ({
 
 // Mock the FileTreeNode and operations
 vi.mock('../FileTreeNode', () => ({
-  FileTreeItem: ({ node, onSelectFile, onExpandDirectory, isExpanded }: any) => (
+  FileTreeItem: ({ node, compactName, onSelectFile, onExpandDirectory, isExpanded }: any) => (
     <div
-      data-testid={`tree-item-${node.name}`}
+      data-testid={`tree-item-${compactName || node.name}`}
       data-path={node.path}
       onClick={() =>
         node.type === 'file'
@@ -80,7 +95,7 @@ vi.mock('../FileTreeNode', () => ({
             : onExpandDirectory(node.path)
       }
     >
-      {node.name}
+      {compactName || node.name}
     </div>
   ),
   InlineInput: () => null,
@@ -95,6 +110,7 @@ vi.mock('../file-tree-operations', () => ({
   openWithDefaultApp: vi.fn(),
   openInTerminal: vi.fn(),
   moveItem: vi.fn(),
+  copyItem: vi.fn(),
   readFileContent: vi.fn(),
 }))
 
@@ -133,6 +149,54 @@ describe('FileTree', () => {
     render(<FileTree filterText="zzzzzzz_nonexistent" />)
 
     expect(screen.getByText('No files match filter')).toBeDefined()
+  })
+
+  it('compacts single-child directory chains', () => {
+    mockFileTree = [
+      {
+        name: 'src',
+        path: '/workspace/src',
+        type: 'directory',
+        children: [
+          {
+            name: 'main',
+            path: '/workspace/src/main',
+            type: 'directory',
+            children: [
+              { name: 'index.ts', path: '/workspace/src/main/index.ts', type: 'file' },
+            ],
+          },
+        ],
+      },
+    ]
+    mockExpandedPaths = new Set(['/workspace/src', '/workspace/src/main'])
+
+    render(<FileTree />)
+
+    expect(screen.getByTestId('tree-item-src/main')).toBeDefined()
+    expect(screen.getByTestId('tree-item-index.ts')).toBeDefined()
+    expect(screen.queryByTestId('tree-item-src')).toBeNull()
+  })
+
+  it('does not compact directories with multiple children', () => {
+    mockFileTree = [
+      {
+        name: 'src',
+        path: '/workspace/src',
+        type: 'directory',
+        children: [
+          { name: 'main.ts', path: '/workspace/src/main.ts', type: 'file' },
+          { name: 'utils.ts', path: '/workspace/src/utils.ts', type: 'file' },
+        ],
+      },
+    ]
+    mockExpandedPaths = new Set(['/workspace/src'])
+
+    render(<FileTree />)
+
+    expect(screen.getByTestId('tree-item-src')).toBeDefined()
+    expect(screen.getByTestId('tree-item-main.ts')).toBeDefined()
+    expect(screen.getByTestId('tree-item-utils.ts')).toBeDefined()
   })
 
   it('renders expanded directory children', () => {
