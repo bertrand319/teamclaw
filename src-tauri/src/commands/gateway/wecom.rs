@@ -252,7 +252,7 @@ impl WeComGateway {
         });
         ws_sink
             .send(tokio_tungstenite::tungstenite::Message::Text(
-                subscribe_msg.to_string(),
+                subscribe_msg.to_string().into(),
             ))
             .await
             .map_err(|e| format!("Failed to send subscribe: {}", e))?;
@@ -295,7 +295,7 @@ impl WeComGateway {
             loop {
                 tokio::select! {
                     _ = tokio::time::sleep(std::time::Duration::from_secs(HEARTBEAT_INTERVAL_SECS)) => {
-                        let ping = tokio_tungstenite::tungstenite::Message::Ping(vec![]);
+                        let ping = tokio_tungstenite::tungstenite::Message::Ping(vec![].into());
                         if let Err(e) = ws_sink_hb.lock().await.send(ping).await {
                             eprintln!("[WeCom] Heartbeat ping failed: {}", e);
                             break;
@@ -1444,7 +1444,7 @@ impl WeComGateway {
             .lock()
             .await
             .send(tokio_tungstenite::tungstenite::Message::Text(
-                reply.to_string(),
+                reply.to_string().into(),
             ))
             .await
             .map_err(|e| format!("Failed to send reply: {}", e))
@@ -1477,7 +1477,7 @@ impl WeComGateway {
             .lock()
             .await
             .send(tokio_tungstenite::tungstenite::Message::Text(
-                reply.to_string(),
+                reply.to_string().into(),
             ))
             .await
             .map_err(|e| format!("Failed to send reply: {}", e))

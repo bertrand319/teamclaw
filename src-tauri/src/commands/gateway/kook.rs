@@ -449,7 +449,7 @@ impl KookGateway {
                         });
 
                         let mut writer = write_for_heartbeat.lock().await;
-                        if let Err(e) = writer.send(WsMessage::Text(ping.to_string())).await {
+                        if let Err(e) = writer.send(WsMessage::Text(ping.to_string().into())).await {
                             println!("[KOOK] Failed to send heartbeat: {}", e);
                             break;
                         }

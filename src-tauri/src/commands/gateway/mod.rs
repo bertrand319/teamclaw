@@ -2034,7 +2034,7 @@ pub async fn test_wecom_credentials(bot_id: String, secret: String) -> Result<St
     });
 
     sink.send(tokio_tungstenite::tungstenite::Message::Text(
-        subscribe.to_string(),
+        subscribe.to_string().into(),
     ))
     .await
     .map_err(|e| format!("Send failed: {}", e))?;

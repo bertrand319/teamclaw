@@ -782,7 +782,7 @@ async fn handle_ws_connection(
                 msg = send_rx.recv() => {
                     match msg {
                         Some(data) => {
-                            if ws_sender.send(WsMessage::Binary(data)).await.is_err() {
+                            if ws_sender.send(WsMessage::Binary(data.into())).await.is_err() {
                                 return;
                             }
                         }
@@ -824,7 +824,7 @@ async fn handle_ws_connection(
                         println!("[Feishu] Received text frame: {}", &text[..text.len().min(200)]);
                     }
                     Some(Ok(WsMessage::Ping(data))) => {
-                        let _ = send_tx.send(data).await; // send as pong
+                        let _ = send_tx.send(data.to_vec()).await; // send as pong
                     }
                     Some(Ok(WsMessage::Pong(_))) => {}
                     Some(Ok(WsMessage::Close(_))) => {

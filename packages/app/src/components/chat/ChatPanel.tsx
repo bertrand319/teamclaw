@@ -331,7 +331,7 @@ export function ChatPanel({ compact = false }: ChatPanelProps) {
 
     if (!text && attachedFiles.length === 0 && mentions.length === 0 && imageFiles.length === 0) return;
 
-    let finalContent = text;
+    let finalContent: string;
     const personMentions: string[] = [];
 
     if (mentions.length > 0) {
