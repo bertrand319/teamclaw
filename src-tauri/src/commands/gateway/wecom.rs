@@ -6,6 +6,14 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, RwLock};
+use std::sync::OnceLock;
+
+/// Global reference to the active WeComGateway for proactive message sending.
+static ACTIVE_GATEWAY: OnceLock<Arc<RwLock<Option<WeComGateway>>>> = OnceLock::new();
+
+fn get_active_gateway_holder() -> &'static Arc<RwLock<Option<WeComGateway>>> {
+    ACTIVE_GATEWAY.get_or_init(|| Arc::new(RwLock::new(None)))
+}
 
 /// Detect image MIME type from file magic bytes
 fn detect_image_mime(bytes: &[u8]) -> Option<String> {
@@ -58,6 +66,7 @@ pub struct WeComGateway {
     permission_approver: super::PermissionAutoApprover,
     session_queue: Arc<SessionQueue>,
     pending_questions: Arc<super::PendingQuestionStore>,
+    shared_ws_sink: Arc<RwLock<Option<WsSink>>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -121,6 +130,7 @@ impl WeComGateway {
             permission_approver: super::PermissionAutoApprover::new(opencode_port),
             session_queue: Arc::new(SessionQueue::new()),
             pending_questions: Arc::new(super::PendingQuestionStore::new()),
+            shared_ws_sink: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -150,6 +160,7 @@ impl WeComGateway {
         }
 
         *self.is_running.write().await = true;
+        *get_active_gateway_holder().write().await = Some(self.clone());
         self.set_status(WeComGatewayStatus::Connecting, None).await;
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -172,6 +183,8 @@ impl WeComGateway {
             let _ = tx.send(());
         }
         self.session_queue.shutdown().await;
+        *get_active_gateway_holder().write().await = None;
+        *self.shared_ws_sink.write().await = None;
         *self.is_running.write().await = false;
         self.set_status(WeComGatewayStatus::Disconnected, None)
             .await;
@@ -223,6 +236,7 @@ impl WeComGateway {
         }
 
         *self.is_running.write().await = false;
+        *get_active_gateway_holder().write().await = None;
         self.set_status(WeComGatewayStatus::Disconnected, None)
             .await;
     }
@@ -288,6 +302,7 @@ impl WeComGateway {
 
         // Heartbeat task
         let ws_sink = Arc::new(tokio::sync::Mutex::new(ws_sink));
+        *self.shared_ws_sink.write().await = Some(Arc::clone(&ws_sink));
         let ws_sink_hb = Arc::clone(&ws_sink);
         let (hb_shutdown_tx, mut hb_shutdown_rx) = mpsc::channel::<()>(1);
 
@@ -347,6 +362,7 @@ impl WeComGateway {
             }
         };
 
+        *self.shared_ws_sink.write().await = None;
         let _ = hb_shutdown_tx.send(()).await;
         heartbeat_handle.abort();
         Ok(exit_reason)
@@ -1483,10 +1499,63 @@ impl WeComGateway {
             .map_err(|e| format!("Failed to send reply: {}", e))
     }
 
+    /// Send a proactive message to a WeCom conversation via aibot_send_msg.
+    /// Requires the gateway to be connected and the target user to have
+    /// previously messaged the bot in that conversation.
+    pub async fn send_chat_message(&self, chatid: &str, text: &str) -> Result<(), String> {
+        use futures_util::SinkExt;
+
+        let ws_sink = self
+            .shared_ws_sink
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| {
+                "WeCom gateway is not connected. Cannot send proactive message.".to_string()
+            })?;
+
+        let msg = serde_json::json!({
+            "cmd": "aibot_send_msg",
+            "headers": { "req_id": uuid::Uuid::new_v4().to_string() },
+            "body": {
+                "chatid": chatid,
+                "msgtype": "text",
+                "text": { "content": text }
+            }
+        });
+
+        ws_sink
+            .lock()
+            .await
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                msg.to_string().into(),
+            ))
+            .await
+            .map_err(|e| format!("Failed to send proactive message: {}", e))?;
+
+        println!("[WeCom] Proactive message sent to chatid={}", chatid);
+        Ok(())
+    }
+
     /// Simple non-streaming reply (for slash commands and errors)
     async fn send_reply(&self, req_id: &str, text: &str, ws_sink: &WsSink) -> Result<(), String> {
         let stream_id = uuid::Uuid::new_v4().to_string();
         self.send_stream_chunk(req_id, &stream_id, text, true, ws_sink)
             .await
     }
+}
+
+/// Send a proactive message to a WeCom conversation.
+/// Called by cron delivery and other modules that don't have direct gateway access.
+/// Requires the WeCom gateway to be running and connected.
+pub async fn send_proactive_message(chatid: &str, text: &str) -> Result<(), String> {
+    let gateway = get_active_gateway_holder()
+        .read()
+        .await
+        .clone()
+        .ok_or_else(|| {
+            "WeCom gateway is not running. Start the WeCom gateway before sending proactive messages.".to_string()
+        })?;
+
+    gateway.send_chat_message(chatid, text).await
 }
