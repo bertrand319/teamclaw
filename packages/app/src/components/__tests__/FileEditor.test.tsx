@@ -110,4 +110,21 @@ describe('FileEditor', () => {
 
     expect(screen.getByText('Unable to load file content')).toBeDefined()
   })
+
+  it('FileContentViewer renders svg files in an iframe preview', () => {
+    const svgDataUrl = 'data:image/svg+xml;base64,PHN2Zy8+'
+
+    const { container } = render(
+      <FileContentViewer
+        selectedFile="/workspace/assets/logo.svg"
+        fileContent={svgDataUrl}
+        isLoadingFile={false}
+        onClose={vi.fn()}
+      />,
+    )
+
+    const iframe = container.querySelector('iframe[title="logo.svg"]')
+    expect(iframe).toBeTruthy()
+    expect(iframe?.getAttribute('src')).toBe(svgDataUrl)
+  })
 })
