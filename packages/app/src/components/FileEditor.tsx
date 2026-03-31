@@ -95,6 +95,7 @@ export function ImageViewer({
   const { t } = useTranslation();
   const [zoom, setZoom] = useState(100);
   const [rotation, setRotation] = useState(0);
+  const isSvg = filename.toLowerCase().endsWith(".svg");
 
   const handleZoomIn = () => setZoom((prev) => Math.min(prev + 25, 300));
   const handleZoomOut = () => setZoom((prev) => Math.max(prev - 25, 25));
@@ -148,14 +149,37 @@ export function ImageViewer({
 
       {/* Image container */}
       <div className="flex-1 overflow-auto bg-muted/20 flex items-center justify-center p-4">
-        <img
-          src={content}
-          alt={filename}
-          className="max-w-full max-h-full object-contain transition-transform duration-200"
+        <div
+          className="rounded-lg p-2"
           style={{
-            transform: `scale(${zoom / 100}) rotate(${rotation}deg)`,
+            backgroundColor: "#ffffff",
+            backgroundImage:
+              "linear-gradient(45deg, #f1f5f9 25%, transparent 25%), linear-gradient(-45deg, #f1f5f9 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #f1f5f9 75%), linear-gradient(-45deg, transparent 75%, #f1f5f9 75%)",
+            backgroundSize: "16px 16px",
+            backgroundPosition: "0 0, 0 8px, 8px -8px, -8px 0px",
           }}
-        />
+        >
+          {isSvg ? (
+            <iframe
+              src={content}
+              title={filename}
+              sandbox=""
+              className="max-w-full max-h-full min-h-[60vh] min-w-[60vw] border-0 bg-transparent transition-transform duration-200"
+              style={{
+                transform: `scale(${zoom / 100}) rotate(${rotation}deg)`,
+              }}
+            />
+          ) : (
+            <img
+              src={content}
+              alt={filename}
+              className="max-w-full max-h-full object-contain transition-transform duration-200"
+              style={{
+                transform: `scale(${zoom / 100}) rotate(${rotation}deg)`,
+              }}
+            />
+          )}
+        </div>
       </div>
     </div>
   );

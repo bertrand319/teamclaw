@@ -96,3 +96,37 @@ describe('MessageBranch components', () => {
     expect(screen.getByText('1 / 2')).toBeDefined()
   })
 })
+
+describe('image preview rendering', () => {
+  it('renders SVG previews with an iframe canvas', async () => {
+    const { ClickableImage } = await import('@/packages/ai/message')
+    const svgDataUrl = 'data:image/svg+xml;base64,PHN2Zy8+'
+
+    const { container } = render(
+      React.createElement(ClickableImage, {
+        src: svgDataUrl,
+        alt: 'diagram.svg',
+      })
+    )
+
+    const iframe = container.querySelector('iframe[title="diagram.svg"]')
+    expect(iframe).toBeTruthy()
+    expect(iframe?.getAttribute('src')).toBe(svgDataUrl)
+  })
+
+  it('renders bitmap previews with img tags', async () => {
+    const { ClickableImage } = await import('@/packages/ai/message')
+    const pngDataUrl = 'data:image/png;base64,abc'
+
+    render(
+      React.createElement(ClickableImage, {
+        src: pngDataUrl,
+        alt: 'photo.png',
+      })
+    )
+
+    const images = screen.getAllByAltText('photo.png')
+    expect(images.length).toBeGreaterThan(0)
+    expect(images[0].getAttribute('src')).toBe(pngDataUrl)
+  })
+})

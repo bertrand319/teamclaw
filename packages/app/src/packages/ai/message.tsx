@@ -144,6 +144,58 @@ function getMimeType(filename: string): string {
   return mimeTypes[ext] || 'image/png'
 }
 
+function isSvgImageSource(src: string): boolean {
+  return src.startsWith('data:image/svg+xml') || /\.svg(?:$|[?#])/i.test(src)
+}
+
+function PreviewImage({
+  src,
+  alt,
+  className,
+}: {
+  src: string
+  alt?: string
+  className?: string
+}) {
+  if (isSvgImageSource(src)) {
+    return (
+      <iframe
+        src={src}
+        title={alt || 'SVG preview'}
+        sandbox=""
+        className={cn("border-0 bg-transparent", className)}
+      />
+    )
+  }
+
+  return (
+    <img
+      src={src}
+      alt={alt || 'Image'}
+      className={className}
+    />
+  )
+}
+
+function PreviewCanvas({
+  children,
+}: React.PropsWithChildren) {
+  return (
+    <div
+      className="rounded-lg p-2"
+      style={{
+        backgroundColor: '#ffffff',
+        backgroundImage:
+          'linear-gradient(45deg, #f1f5f9 25%, transparent 25%), linear-gradient(-45deg, #f1f5f9 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #f1f5f9 75%), linear-gradient(-45deg, transparent 75%, #f1f5f9 75%)',
+        backgroundSize: '16px 16px',
+        backgroundPosition: '0 0, 0 8px, 8px -8px, -8px 0px',
+      }}
+    >
+      {children}
+    </div>
+  )
+}
+
 // Component to load and display local image files with click-to-enlarge
 export function LocalImage({ src, alt, className, onError: onErrorCallback, onLoad: onLoadCallback }: { src: string; alt?: string; className?: string; onError?: () => void; onLoad?: () => void }) {
   const [dataUrl, setDataUrl] = React.useState<string | null>(null)
@@ -233,11 +285,13 @@ export function LocalImage({ src, alt, className, onError: onErrorCallback, onLo
               <X className="h-4 w-4" />
             </button>
           </div>
-          <img 
-            src={dataUrl} 
-            alt={alt || 'Image'} 
-            className="max-w-[95vw] max-h-[95vh] object-contain rounded-lg"
-          />
+          <PreviewCanvas>
+            <PreviewImage
+              src={dataUrl}
+              alt={alt || 'Image'}
+              className="max-w-[95vw] max-h-[95vh] w-[95vw] h-[95vh] object-contain rounded-lg"
+            />
+          </PreviewCanvas>
           {alt && (
             <div className="absolute bottom-0 left-0 right-0 bg-black/60 px-3 py-1.5 text-center text-xs text-white/90 rounded-b-lg">
               {alt}
@@ -391,11 +445,13 @@ export function ClickableImage({ src, alt, className }: { src: string; alt?: str
               <X className="h-4 w-4" />
             </button>
           </div>
-          <img 
-            src={src} 
-            alt={alt || 'Image'} 
-            className="max-w-[95vw] max-h-[95vh] object-contain rounded-lg"
-          />
+          <PreviewCanvas>
+            <PreviewImage
+              src={src}
+              alt={alt || 'Image'}
+              className="max-w-[95vw] max-h-[95vh] w-[95vw] h-[95vh] object-contain rounded-lg"
+            />
+          </PreviewCanvas>
           {alt && (
             <div className="absolute bottom-0 left-0 right-0 bg-black/60 px-3 py-1.5 text-center text-xs text-white/90 rounded-b-lg">
               {alt}
