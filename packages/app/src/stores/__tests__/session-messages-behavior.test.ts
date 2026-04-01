@@ -160,13 +160,14 @@ describe('session store: message behavior', () => {
 
     it('calls sendMessageAsync with correct session and content', async () => {
       await useSessionStore.getState().sendMessage('test content');
-      expect(mockSendMessageAsync).toHaveBeenCalledWith(
-        'sess-1',
-        'test content',
-        undefined, // no model
-        undefined, // no agent
-        undefined, // no system prompt (localStorage empty in test)
-      );
+      expect(mockSendMessageAsync).toHaveBeenCalledTimes(1);
+      const callArgs = mockSendMessageAsync.mock.calls[0];
+      expect(callArgs[0]).toBe('sess-1');
+      expect(callArgs[1]).toBe('test content');
+      expect(callArgs[2]).toBeUndefined();
+      expect(callArgs[3]).toBeUndefined();
+      expect(callArgs[4]).toContain('Prefer non-interactive commands');
+      expect(callArgs[4]).toContain('ask the user first');
     });
 
     it('adds browser-routing system prompt for login-related web tasks', async () => {

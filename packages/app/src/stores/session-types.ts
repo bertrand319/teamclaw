@@ -9,6 +9,7 @@ import type {
   SessionErrorEvent,
   SendMessageFilePart,
 } from '@/lib/opencode/types';
+import type { TerminalPromptKind } from "@/lib/terminal-interaction";
 import type {
   SessionCreatedEvent,
   SessionUpdatedEvent,
@@ -65,6 +66,19 @@ export interface ToolCall {
         title?: string;
       };
     }>;
+  };
+}
+
+export interface PendingQuestionState {
+  questionId: string; // The question.asked event ID, or a local synthetic question id
+  toolCallId: string;
+  messageId: string;
+  questions: Question[];
+  source?: "opencode" | "terminal_input";
+  terminalInputContext?: {
+    command?: string;
+    prompt?: string;
+    kind?: TerminalPromptKind;
   };
 }
 
@@ -169,12 +183,7 @@ export interface SessionState {
   pendingPermissionChildSessionId: string | null;
 
   // Pending question (from question tool)
-  pendingQuestion: {
-    questionId: string; // The question.asked event ID
-    toolCallId: string;
-    messageId: string;
-    questions: Question[];
-  } | null;
+  pendingQuestion: PendingQuestionState | null;
 
   // Todo list (from todowrite tool)
   todos: Todo[];
@@ -240,12 +249,7 @@ export interface SessionState {
   // Actions - Question
   answerQuestion: (answers: Record<string, string>) => Promise<void>;
   setPendingQuestion: (
-    question: {
-      questionId: string;
-      toolCallId: string;
-      messageId: string;
-      questions: Question[];
-    } | null,
+    question: PendingQuestionState | null,
   ) => void;
   handleQuestionAsked: (event: QuestionAskedEvent) => void;
 

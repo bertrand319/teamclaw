@@ -17,6 +17,11 @@ import {
   useStreamingStore,
 } from "@/stores/streaming";
 import { sessionDataCache } from "./session-data-cache";
+import {
+  buildTerminalInputFollowUpMessage,
+  isTerminalCancelAnswer,
+  isSyntheticTerminalQuestionId,
+} from "@/lib/terminal-interaction";
 
 type SessionSet = (fn: ((state: SessionState) => Partial<SessionState>) | Partial<SessionState>) => void;
 type SessionGet = () => SessionState;
@@ -46,6 +51,63 @@ export function createQuestionActions(set: SessionSet, get: SessionGet) {
           pendingQuestion.questionId,
         );
         console.log("[Question] Answers:", formattedAnswers);
+
+        if (
+          pendingQuestion.source === "terminal_input" ||
+          isSyntheticTerminalQuestionId(pendingQuestion.questionId)
+        ) {
+          const answerText = formattedAnswers.flat().join("; ").trim();
+          const streamingMessageId = useStreamingStore.getState().streamingMessageId;
+
+          if (streamingMessageId) {
+            await get().abortSession();
+          }
+
+          set((state) => ({
+            sessions: state.sessions.map((s) =>
+              s.id === activeSessionId
+                ? {
+                    ...s,
+                    messages: s.messages.map((m) => ({
+                      ...m,
+                      toolCalls: m.toolCalls?.map((tc) =>
+                        tc.id === pendingQuestion.toolCallId
+                          ? {
+                              ...tc,
+                              status: "failed" as const,
+                              questions: undefined,
+                            }
+                          : tc,
+                      ),
+                    })),
+                    updatedAt: new Date(),
+                  }
+                : s,
+            ),
+            pendingQuestion: null,
+          }));
+
+          if (activeSessionId) {
+            const cached = sessionDataCache.get(activeSessionId);
+            if (cached) {
+              sessionDataCache.set(activeSessionId, { ...cached, pendingQuestion: null });
+            }
+          }
+
+          if (isTerminalCancelAnswer(answerText)) {
+            return;
+          }
+
+          const followUp = buildTerminalInputFollowUpMessage({
+            command: pendingQuestion.terminalInputContext?.command || "",
+            prompt: pendingQuestion.terminalInputContext?.prompt || "",
+            answer: answerText,
+            kind: pendingQuestion.terminalInputContext?.kind || "generic",
+          });
+
+          await get().sendMessage(followUp);
+          return;
+        }
 
         try {
           await client.replyQuestion(
@@ -145,6 +207,7 @@ export function createQuestionActions(set: SessionSet, get: SessionGet) {
           streamingMessageId ||
           "",
         questions: event.questions || existing?.questions || [],
+        source: "opencode" as const,
       };
 
       if (event.sessionId !== activeSessionId) {

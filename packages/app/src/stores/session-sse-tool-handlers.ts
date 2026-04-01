@@ -23,6 +23,14 @@ import {
   useStreamingStore,
 } from "@/stores/streaming";
 import { sessionDataCache } from "./session-data-cache";
+import {
+  buildTerminalInputQuestion,
+  extractTerminalPromptSnippet,
+  getCommandText,
+  getTerminalPromptKind,
+  getToolCallOutputText,
+  isLikelyTerminalPromptText,
+} from "@/lib/terminal-interaction";
 
 type SessionSet = (fn: ((state: SessionState) => Partial<SessionState>) | Partial<SessionState>) => void;
 type SessionGet = () => SessionState;
@@ -55,12 +63,67 @@ export function createToolHandlers(set: SessionSet, get: SessionGet) {
 
       const isQuestionTool = event.toolName.toLowerCase() === "question";
       const isRunning = event.status === "running";
+      const toolNameLower = event.toolName.toLowerCase();
+      const isCommandTool =
+        toolNameLower.includes("bash") ||
+        toolNameLower.includes("shell") ||
+        toolNameLower.includes("terminal") ||
+        toolNameLower.includes("run_command");
+      const commandText = getCommandText(event.arguments);
+      const outputText = getToolCallOutputText(event.result);
+      const needsTerminalInput =
+        isCommandTool &&
+        isRunning &&
+        isLikelyTerminalPromptText(outputText);
 
       let questions: Question[] | undefined;
       if (isQuestionTool && event.arguments) {
         const args = event.arguments as unknown as QuestionToolInput;
         if (args.questions && Array.isArray(args.questions)) {
           questions = args.questions;
+        }
+      }
+
+      if (needsTerminalInput) {
+        const promptSnippet = extractTerminalPromptSnippet(outputText);
+        questions = [buildTerminalInputQuestion(commandText, outputText)];
+
+        const questionData = {
+          questionId: `terminal-input:${event.toolCallId}`,
+          toolCallId: event.toolCallId,
+          messageId: streamingMessageId,
+          questions,
+          source: "terminal_input" as const,
+          terminalInputContext: {
+            command: commandText,
+            prompt: promptSnippet,
+            kind: getTerminalPromptKind(promptSnippet),
+          },
+        };
+
+        const existing = get().pendingQuestion;
+        if (
+          !existing ||
+          existing.source !== "opencode" ||
+          existing.toolCallId === event.toolCallId
+        ) {
+          set({ pendingQuestion: questionData });
+          if (activeSessionId) {
+            const cached = sessionDataCache.get(activeSessionId) || { todos: [], diff: [] };
+            sessionDataCache.set(activeSessionId, { ...cached, pendingQuestion: questionData });
+          }
+        }
+      } else if (
+        get().pendingQuestion?.source === "terminal_input" &&
+        get().pendingQuestion?.toolCallId === event.toolCallId &&
+        event.status !== "running"
+      ) {
+        set({ pendingQuestion: null });
+        if (activeSessionId) {
+          const cached = sessionDataCache.get(activeSessionId);
+          if (cached) {
+            sessionDataCache.set(activeSessionId, { ...cached, pendingQuestion: null });
+          }
         }
       }
 
@@ -113,7 +176,9 @@ export function createToolHandlers(set: SessionSet, get: SessionGet) {
         );
 
         if (existingTool) {
-          const newStatus = mapStatus(event.status);
+          const newStatus = needsTerminalInput
+            ? "waiting"
+            : mapStatus(event.status);
           updatedMessage = {
             ...m,
             toolCalls: m.toolCalls?.map((tc) =>
@@ -132,7 +197,11 @@ export function createToolHandlers(set: SessionSet, get: SessionGet) {
                       (newStatus === "completed" && tc.startTime
                         ? Date.now() - tc.startTime.getTime()
                         : tc.duration),
-                    questions: questions || tc.questions,
+                    questions:
+                      questions ||
+                      (event.status === "completed" || event.status === "failed"
+                        ? undefined
+                        : tc.questions),
                     metadata: event.metadata || tc.metadata,
                   }
                 : tc,
@@ -143,7 +212,7 @@ export function createToolHandlers(set: SessionSet, get: SessionGet) {
           const newToolCall: ToolCall = {
             id: event.toolCallId,
             name: event.toolName,
-            status: mapStatus(event.status),
+            status: needsTerminalInput ? "waiting" : mapStatus(event.status),
             arguments: event.arguments || {},
             result: event.result,
             duration: event.duration,

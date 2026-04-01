@@ -12,6 +12,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { QuestionCard } from "./QuestionCard";
+import { getCommandText } from "@/lib/terminal-interaction";
 
 // Import sub-cards and utilities from tool-calls/
 import { WriteToolCard } from "./tool-calls/WriteToolCard";
@@ -28,6 +29,8 @@ import {
   isReadTool,
   isTaskTool,
   isSkillTool,
+  isCommandTool,
+  isCommandToolLikelyWaitingForInput,
   formatToolName,
   useToolCallTimeout,
 } from "./tool-calls/tool-call-utils";
@@ -47,6 +50,9 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCall, onOpenD
   const config = statusConfig[toolCall.status];
   const StatusIcon = config.icon;
   const ToolIcon = getToolIcon(toolCall.name);
+  const isCommand = isCommandTool(toolCall.name);
+  const isWaitingForInput = isCommandToolLikelyWaitingForInput(toolCall);
+  const commandText = getCommandText(toolCall.arguments);
 
   const handleForceComplete = useCallback(
     (e: React.MouseEvent) => {
@@ -148,156 +154,179 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCall, onOpenD
   }
 
   return (
-    <Collapsible open={expanded} onOpenChange={setExpanded}>
-      <div className="rounded-lg border border-border bg-muted/30 overflow-hidden transition-all duration-200">
-        <CollapsibleTrigger asChild>
-          <button className="w-full flex items-center gap-2 px-3 py-2 text-left bg-muted/50 hover:bg-muted/70 transition-colors">
-            {/* Expand icon */}
-            <ChevronRight
-              size={14}
-              className={cn(
-                "text-muted-foreground transition-transform duration-200 shrink-0",
-                expanded && "rotate-90",
-              )}
-            />
-
-            {/* Tool icon */}
-            <ToolIcon size={14} className="text-muted-foreground shrink-0" />
-
-            {/* Tool name */}
-            <span className="text-xs font-medium text-foreground">
-              {formatToolName(toolCall.name)}
-            </span>
-
-            {/* Summary (if available and not expanded) */}
-            {summary && !expanded && (
-              <span className="text-xs text-muted-foreground truncate flex-1 max-w-[200px] font-mono">
-                {summary}
+    <div className="space-y-2">
+      <Collapsible open={expanded} onOpenChange={setExpanded}>
+        <div className="rounded-lg border border-border bg-muted/30 overflow-hidden transition-all duration-200">
+          <CollapsibleTrigger asChild>
+            <button className="w-full flex items-center gap-2 px-3 py-2 text-left bg-muted/50 hover:bg-muted/70 transition-colors">
+              <ChevronRight
+                size={14}
+                className={cn(
+                  "text-muted-foreground transition-transform duration-200 shrink-0",
+                  expanded && "rotate-90",
+                )}
+              />
+              <ToolIcon size={14} className="text-muted-foreground shrink-0" />
+              <span className="text-xs font-medium text-foreground">
+                {formatToolName(toolCall.name)}
               </span>
-            )}
-
-            {/* Status indicator */}
-            <div className="ml-auto flex items-center gap-2">
-              {/* Duration */}
-              {toolCall.duration && (
-                <span className="text-[10px] text-muted-foreground/70">
-                  {formatDuration(toolCall.duration)}
+              {summary && !expanded && (
+                <span className="text-xs text-muted-foreground truncate flex-1 max-w-[200px] font-mono">
+                  {summary}
                 </span>
               )}
-
-              {/* Status icon or timeout button */}
-              {isTimedOut ? (
-                <button
-                  onClick={handleForceComplete}
-                  className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] bg-muted hover:bg-muted/80 text-foreground border border-border transition-colors"
-                  title="Tool call timed out - click to mark as done"
-                >
-                  <AlertTriangle size={10} />
-                  <span>Timed out</span>
-                  <CheckCircle2 size={10} />
-                </button>
-              ) : (
-                <StatusIcon
-                  size={14}
-                  className={cn(
-                    config.textColor,
-                    config.animate && "animate-spin",
-                  )}
-                />
-              )}
-            </div>
-          </button>
-        </CollapsibleTrigger>
-
-        <CollapsibleContent>
-          <div className="px-3 pb-3 pt-1 text-xs space-y-2 border-t border-border/50">
-            {/* Arguments */}
-            {toolCall.arguments &&
-              Object.keys(toolCall.arguments).length > 0 && (
-                <div>
-                  <span className="text-muted-foreground font-medium">
-                    Arguments
+              <div className="ml-auto flex items-center gap-2">
+                {toolCall.duration && (
+                  <span className="text-[10px] text-muted-foreground/70">
+                    {formatDuration(toolCall.duration)}
                   </span>
-                  <pre className="mt-1 p-2 bg-background/60 rounded text-[10px] overflow-x-auto font-mono max-h-24">
-                    {JSON.stringify(toolCall.arguments, null, 2)}
-                  </pre>
+                )}
+                {isTimedOut ? (
+                  <button
+                    onClick={handleForceComplete}
+                    className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] bg-muted hover:bg-muted/80 text-foreground border border-border transition-colors"
+                    title={
+                      isCommand
+                        ? "Command may be blocked waiting for terminal input - click to mark as done"
+                        : "Tool call timed out - click to mark as done"
+                    }
+                  >
+                    <AlertTriangle size={10} />
+                    <span>{isCommand ? "Waiting input" : "Timed out"}</span>
+                    <CheckCircle2 size={10} />
+                  </button>
+                ) : isWaitingForInput ? (
+                  <div
+                    className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] bg-amber-100 text-amber-800 border border-amber-200"
+                    title="Command output looks like it is waiting for confirmation or stdin input"
+                  >
+                    <AlertTriangle size={10} />
+                    <span>Input needed</span>
+                  </div>
+                ) : (
+                  <StatusIcon
+                    size={14}
+                    className={cn(
+                      config.textColor,
+                      config.animate && "animate-spin",
+                    )}
+                  />
+                )}
+              </div>
+            </button>
+          </CollapsibleTrigger>
+
+          <CollapsibleContent>
+            <div className="px-3 pb-3 pt-1 text-xs space-y-2 border-t border-border/50">
+              {isCommand && (isWaitingForInput || isTimedOut) && (
+                <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 px-2 py-2 text-[11px] text-amber-900">
+                  <AlertTriangle size={12} className="mt-0.5 shrink-0" />
+                  <div className="space-y-1">
+                    <p className="font-medium">
+                      {isWaitingForInput
+                        ? "This command looks like it is waiting for terminal input."
+                        : "This command has been running for a while."}
+                    </p>
+                    <p className="text-amber-800/90">
+                      Prefer non-interactive flags like `--yes` or `-y`. If input is required, ask a question before running the command.
+                    </p>
+                    {commandText && (
+                      <p className="font-mono text-[10px] break-all text-amber-800/80">
+                        {commandText}
+                      </p>
+                    )}
+                  </div>
                 </div>
               )}
 
-            {/* Result - handle various result formats */}
-            {(() => {
-              // Extract result content - handle different formats
-              let resultContent = toolCall.result;
-
-              // If result is an object with content array (common MCP format)
-              if (resultContent && typeof resultContent === "object") {
-                const resultObj = resultContent as Record<string, unknown>;
-                // Check for common MCP result structures
-                if (Array.isArray(resultObj.content)) {
-                  // Extract text from content array
-                  const textParts = resultObj.content
-                    .filter(
-                      (c: unknown) =>
-                        c &&
-                        typeof c === "object" &&
-                        (c as Record<string, unknown>).type === "text",
-                    )
-                    .map((c: unknown) => (c as Record<string, unknown>).text)
-                    .join("\n");
-                  if (textParts) resultContent = textParts;
-                } else if (resultObj.text) {
-                  resultContent = resultObj.text;
-                } else if (resultObj.output) {
-                  resultContent = resultObj.output;
-                }
-              }
-
-              if (resultContent !== undefined && resultContent !== null) {
-                const displayText =
-                  typeof resultContent === "string"
-                    ? resultContent.slice(0, 500) +
-                      (resultContent.length > 500 ? "..." : "")
-                    : JSON.stringify(resultContent, null, 2);
-
-                return (
+              {toolCall.arguments &&
+                Object.keys(toolCall.arguments).length > 0 && (
                   <div>
                     <span className="text-muted-foreground font-medium">
-                      Result
+                      Arguments
                     </span>
-                    <pre className="mt-1 p-2 bg-background/60 rounded text-[10px] overflow-x-auto max-h-48 font-mono whitespace-pre-wrap">
-                      {displayText}
+                    <pre className="mt-1 p-2 bg-background/60 rounded text-[10px] overflow-x-auto font-mono max-h-24">
+                      {JSON.stringify(toolCall.arguments, null, 2)}
                     </pre>
                   </div>
-                );
-              }
-              return null;
-            })()}
+                )}
 
-            {/* Show placeholder if no content */}
-            {(!toolCall.arguments ||
-              Object.keys(toolCall.arguments).length === 0) &&
-              (toolCall.result === undefined || toolCall.result === null) && (
-                <div className="text-muted-foreground/60 italic py-2">
-                  No details available
-                </div>
-              )}
+              {(() => {
+                let resultContent = toolCall.result;
 
-            {/* View details link */}
-            {onOpenDetail && (
-              <button
-                onClick={() =>
-                  onOpenDetail(getDetailType(toolCall.name), toolCall)
+                if (resultContent && typeof resultContent === "object") {
+                  const resultObj = resultContent as Record<string, unknown>;
+                  if (Array.isArray(resultObj.content)) {
+                    const textParts = resultObj.content
+                      .filter(
+                        (c: unknown) =>
+                          c &&
+                          typeof c === "object" &&
+                          (c as Record<string, unknown>).type === "text",
+                      )
+                      .map((c: unknown) => (c as Record<string, unknown>).text)
+                      .join("\n");
+                    if (textParts) resultContent = textParts;
+                  } else if (resultObj.text) {
+                    resultContent = resultObj.text;
+                  } else if (resultObj.output) {
+                    resultContent = resultObj.output;
+                  }
                 }
-                className="text-[10px] text-muted-foreground hover:text-foreground hover:underline"
-              >
-                View full details →
-              </button>
-            )}
-          </div>
-        </CollapsibleContent>
 
-        <PermissionApprovalBar toolCall={toolCall} />
-      </div>
-    </Collapsible>
+                if (resultContent !== undefined && resultContent !== null) {
+                  const displayText =
+                    typeof resultContent === "string"
+                      ? resultContent.slice(0, 500) +
+                        (resultContent.length > 500 ? "..." : "")
+                      : JSON.stringify(resultContent, null, 2);
+
+                  return (
+                    <div>
+                      <span className="text-muted-foreground font-medium">
+                        Result
+                      </span>
+                      <pre className="mt-1 p-2 bg-background/60 rounded text-[10px] overflow-x-auto max-h-48 font-mono whitespace-pre-wrap">
+                        {displayText}
+                      </pre>
+                    </div>
+                  );
+                }
+                return null;
+              })()}
+
+              {(!toolCall.arguments ||
+                Object.keys(toolCall.arguments).length === 0) &&
+                (toolCall.result === undefined || toolCall.result === null) && (
+                  <div className="text-muted-foreground/60 italic py-2">
+                    No details available
+                  </div>
+                )}
+
+              {onOpenDetail && (
+                <button
+                  onClick={() =>
+                    onOpenDetail(getDetailType(toolCall.name), toolCall)
+                  }
+                  className="text-[10px] text-muted-foreground hover:text-foreground hover:underline"
+                >
+                  View full details →
+                </button>
+              )}
+            </div>
+          </CollapsibleContent>
+
+          <PermissionApprovalBar toolCall={toolCall} />
+        </div>
+      </Collapsible>
+
+      {!!toolCall.questions?.length && (
+        <QuestionCard
+          toolCallId={toolCall.id}
+          questions={toolCall.questions}
+          isCompleted={toolCall.status === "completed"}
+        />
+      )}
+    </div>
   );
 });

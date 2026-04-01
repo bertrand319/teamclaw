@@ -12,6 +12,10 @@ import {
   X,
 } from "lucide-react";
 import type { ToolCall } from "@/stores/session";
+import {
+  getToolCallOutputText,
+  isLikelyTerminalPromptText,
+} from "@/lib/terminal-interaction";
 
 export const statusConfig = {
   calling: {
@@ -121,6 +125,19 @@ export function isCommandTool(toolName: string): boolean {
     name.includes("terminal") ||
     name.includes("run_command")
   );
+}
+
+export function isCommandToolLikelyWaitingForInput(
+  toolCall: Pick<ToolCall, "name" | "status" | "arguments" | "result">,
+): boolean {
+  if (!isCommandTool(toolCall.name) || toolCall.status !== "calling") {
+    return false;
+  }
+
+  const output = getToolCallOutputText(toolCall.result).trim();
+  if (!output) return false;
+
+  return isLikelyTerminalPromptText(output);
 }
 
 // Check if this is a Task tool (subagent)
