@@ -147,6 +147,29 @@ describe('session-sse-tool-handlers', () => {
     expect(stateMutations).toHaveLength(0)
   })
 
+  it('creates a synthetic question when a command waits for input', () => {
+    handlers.handleToolExecuting({
+      toolCallId: 'tc-bash-1',
+      toolName: 'bash',
+      status: 'running',
+      arguments: { command: 'rm -rf build' },
+      result: 'This will remove files. Continue? [y/N]',
+      sessionId: 'sess-1',
+      messageId: 'msg-assist-1',
+    } as any)
+
+    expect((state as any).pendingQuestion).toMatchObject({
+      questionId: 'terminal-input:tc-bash-1',
+      toolCallId: 'tc-bash-1',
+      source: 'terminal_input',
+    })
+
+    const session = sessionLookupCache.get('sess-1')
+    const toolCall = session?.messages[0]?.toolCalls?.find((t: any) => t.id === 'tc-bash-1')
+    expect(toolCall?.status).toBe('waiting')
+    expect(toolCall?.questions?.[0]?.header).toBe('Terminal Input')
+  })
+
   it('handleTodoUpdated sets todos in state and caches them', () => {
     const todos = [
       { id: 't1', content: 'Fix bug', status: 'pending', priority: 'high' },

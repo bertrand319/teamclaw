@@ -35,6 +35,14 @@ const LOGIN_RELATED_PROMPT = [
   "Use webfetch only for public pages that do not require authentication or interactive browser state.",
 ].join(" ");
 
+const TERMINAL_NON_INTERACTIVE_PROMPT = [
+  "Terminal execution rule:",
+  "Prefer non-interactive commands.",
+  "If a command may wait for confirmation, passwords, editor input, or stdin, do not run it in interactive mode.",
+  "First look for safe non-interactive flags or env such as `--yes`, `-y`, `--force`, `CI=1`, `DEBIAN_FRONTEND=noninteractive`, `GIT_PAGER=cat`, or `PAGER=cat` when appropriate.",
+  "If the task truly requires user confirmation and there is no safe non-interactive form, ask the user first instead of starting a command that waits on terminal input.",
+].join(" ");
+
 const LOGIN_RELATED_PATTERNS = [
   /\b(login|log in|sign in|signin|authenticate|authentication|reauth|oauth|sso|mfa|2fa|captcha|cookie|cookies|session)\b/i,
   /(登录|登陆|认证|鉴权|授权|会话|cookie|验证码|二次验证|双因子|单点登录)/i,
@@ -300,6 +308,11 @@ export function createMessageActions(set: SessionSet, get: SessionGet) {
         if (shouldPreferInteractiveBrowserForMessage(content)) {
           systemPrompt = appendSystemPrompt(systemPrompt, LOGIN_RELATED_PROMPT);
         }
+
+        systemPrompt = appendSystemPrompt(
+          systemPrompt,
+          TERMINAL_NON_INTERACTIVE_PROMPT,
+        );
 
         if (ragResult.chunks && ragResult.chunks.length > 0) {
           set((state) => {

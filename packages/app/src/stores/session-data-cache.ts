@@ -1,13 +1,8 @@
-import type { Todo, FileDiff, Question } from "@/lib/opencode/types";
-import type { QueuedMessage } from "./session-types";
+import type { Todo, FileDiff } from "@/lib/opencode/types";
+import type { PendingQuestionState, QueuedMessage } from "./session-types";
 
 // Pending question data cached per session
-export interface CachedPendingQuestion {
-  questionId: string;
-  toolCallId: string;
-  messageId: string;
-  questions: Question[];
-}
+export type CachedPendingQuestion = PendingQuestionState;
 
 // Cache for session-specific data (todos, diff, message queue, and pending questions)
 // Shared across session action modules

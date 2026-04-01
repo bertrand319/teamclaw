@@ -22,6 +22,11 @@ export const QuestionCard = React.memo(function QuestionCard({ toolCallId, quest
   const [hasSubmitted, setHasSubmitted] = React.useState(false)
 
   const isPending = pendingQuestion?.toolCallId === toolCallId
+  const terminalPromptKind =
+    isPending && pendingQuestion?.source === 'terminal_input'
+      ? pendingQuestion.terminalInputContext?.kind
+      : undefined
+  const isSensitiveTerminalInput = terminalPromptKind === 'password'
   // questionId arrives via question.asked SSE event (may lag behind tool executing event)
   const hasQuestionId = !!pendingQuestion?.questionId
   // Show as waiting for completion if submitted but not yet completed
@@ -158,7 +163,15 @@ export const QuestionCard = React.memo(function QuestionCard({ toolCallId, quest
               {showInteractiveUI && (
                 <div className="pt-1">
                   <Input
-                    placeholder={question.options?.length ? "Or type a custom answer..." : "Type your answer..."}
+                    type={isSensitiveTerminalInput ? "password" : "text"}
+                    autoComplete={isSensitiveTerminalInput ? "off" : undefined}
+                    placeholder={
+                      isSensitiveTerminalInput
+                        ? "Type the password or passphrase..."
+                        : question.options?.length
+                          ? "Or type a custom answer..."
+                          : "Type your answer..."
+                    }
                     value={customInput}
                     onChange={(e) => handleCustomInput(qIndex, e.target.value)}
                     onKeyDown={(e) => {

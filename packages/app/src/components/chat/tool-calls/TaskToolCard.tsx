@@ -17,11 +17,21 @@ import { ToolCall, useSessionStore, convertMessage } from "@/stores/session";
 import { useStreamingStore } from "@/stores/streaming";
 import { useWorkspaceStore } from "@/stores/workspace";
 import {
+  getCommandText,
+  getToolCallOutputText,
+} from "@/lib/terminal-interaction";
+import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
-import { statusConfig, formatToolName, useToolCallTimeout, isCommandTool } from "./tool-call-utils";
+import {
+  statusConfig,
+  formatToolName,
+  useToolCallTimeout,
+  isCommandTool,
+  isCommandToolLikelyWaitingForInput,
+} from "./tool-call-utils";
 
 // Skill Tool Card - Shows skill execution inline
 export function SkillToolCard({ toolCall }: { toolCall: ToolCall }) {
@@ -514,23 +524,9 @@ function SubagentToolCallItem({ toolCall }: { toolCall: ToolCall }) {
   }
 
   if (isCommandTool(toolCall.name)) {
-    const command =
-      (typeof args?.command === "string" ? args.command : null) ||
-      (typeof args?.cmd === "string" ? args.cmd : null) ||
-      (typeof args?.input === "string" ? args.input : null) ||
-      "";
-    const outputRaw = toolCall.result;
-    const output =
-      typeof outputRaw === "string"
-        ? outputRaw
-        : outputRaw != null && typeof outputRaw === "object"
-          ? String(
-              (outputRaw as Record<string, unknown>).raw ??
-                (outputRaw as Record<string, unknown>).output ??
-                (outputRaw as Record<string, unknown>).result ??
-                "",
-            )
-          : "";
+    const command = getCommandText(args);
+    const output = getToolCallOutputText(toolCall.result);
+    const isWaitingForInput = isCommandToolLikelyWaitingForInput(toolCall);
     const cmdSummary = command ? (command.length > 80 ? `${command.slice(0, 80)}…` : command) : null;
     return (
       <Collapsible open={expanded} onOpenChange={setExpanded}>
@@ -552,7 +548,12 @@ function SubagentToolCallItem({ toolCall }: { toolCall: ToolCall }) {
                   {cmdSummary}
                 </span>
               )}
-              {output !== "" && (
+              {isWaitingForInput ? (
+                <span className="flex items-center gap-1 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-800 border border-amber-200">
+                  <AlertTriangle size={10} />
+                  Input needed
+                </span>
+              ) : output !== "" && (
                 <span className="text-[10px] text-muted-foreground">
                   {toolCall.status === "completed" ? "✓" : toolCall.status === "failed" ? "✗" : "..."}
                 </span>
@@ -561,6 +562,17 @@ function SubagentToolCallItem({ toolCall }: { toolCall: ToolCall }) {
           </CollapsibleTrigger>
           <CollapsibleContent>
             <div className="border-t border-border/50 p-2 space-y-2 bg-muted/10">
+              {isWaitingForInput && (
+                <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 px-2 py-2 text-[11px] text-amber-900">
+                  <AlertTriangle size={12} className="mt-0.5 shrink-0" />
+                  <div>
+                    <p className="font-medium">This command looks like it is waiting for terminal input.</p>
+                    <p className="text-amber-800/90">
+                      Prefer non-interactive flags like `--yes` or `-y`, or ask a question before continuing.
+                    </p>
+                  </div>
+                </div>
+              )}
               <div>
                 <label className="text-[10px] text-muted-foreground">Command</label>
                 <div className="mt-1 flex items-center gap-2 p-2 bg-bg-tertiary rounded-md text-xs font-mono">
