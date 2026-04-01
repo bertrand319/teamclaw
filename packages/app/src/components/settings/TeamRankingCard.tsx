@@ -4,6 +4,7 @@ import { Trophy, Flame, MessageSquareHeart, ChevronRight } from 'lucide-react'
 import { cn, isTauri } from '@/lib/utils'
 import { TEAM_SYNCED_EVENT } from '@/lib/build-config'
 import { useTeamModeStore } from '@/stores/team-mode'
+import { useTeamMembersStore } from '@/stores/team-members'
 
 async function tauriInvoke<T>(
   cmd: string,
@@ -48,19 +49,21 @@ interface TeamRankingCardProps {
 export function TeamRankingCard({ onClick }: TeamRankingCardProps) {
   const { t } = useTranslation()
   const [leaderboard, setLeaderboard] = React.useState<TeamLeaderboard | null>(null)
-  const [currentDeviceId, setCurrentDeviceId] = React.useState<string | null>(null)
+  const [currentMemberName, setCurrentMemberName] = React.useState<string | null>(null)
   const teamMode = useTeamModeStore((s) => s.teamMode)
+  const teamMembers = useTeamMembersStore((s) => s.members)
 
   React.useEffect(() => {
     const load = async () => {
       if (!isTauri()) return
       try {
-        const [leaderboardResult, nodeId] = await Promise.all([
+        const [leaderboardResult, hostname] = await Promise.all([
           tauriInvoke<TeamLeaderboard>("telemetry_get_team_leaderboard"),
-          tauriInvoke<string>("get_device_node_id"),
+          tauriInvoke<string>("get_device_hostname"),
         ])
         setLeaderboard(leaderboardResult)
-        setCurrentDeviceId(nodeId)
+        const me = teamMembers.find((m) => m.hostname === hostname)
+        setCurrentMemberName(me?.name || hostname)
       } catch {
         // Ignore errors
       }
@@ -72,21 +75,21 @@ export function TeamRankingCard({ onClick }: TeamRankingCardProps) {
     }
     window.addEventListener(TEAM_SYNCED_EVENT, handler)
     return () => window.removeEventListener(TEAM_SYNCED_EVENT, handler)
-  }, [])
+  }, [teamMembers])
 
   // Clear leaderboard data when team mode is disabled
   React.useEffect(() => {
     if (!teamMode) {
       setLeaderboard(null)
-      setCurrentDeviceId(null)
+      setCurrentMemberName(null)
     }
   }, [teamMode])
 
   // Calculate current user's rank
   const currentMember = React.useMemo(() => {
-    if (!leaderboard?.members || !currentDeviceId) return null
-    return leaderboard.members.find((m) => m.memberId === currentDeviceId)
-  }, [leaderboard, currentDeviceId])
+    if (!leaderboard?.members || !currentMemberName) return null
+    return leaderboard.members.find((m) => m.memberName === currentMemberName)
+  }, [leaderboard, currentMemberName])
 
   const ranks = React.useMemo(() => {
     if (!leaderboard?.members || !currentMember) {
@@ -116,20 +119,20 @@ export function TeamRankingCard({ onClick }: TeamRankingCardProps) {
       (a, b) => b.aggregated.totalFeedbacks - a.aggregated.totalFeedbacks
     )
 
-    const tokenRank = tokenSorted.findIndex((m) => m.memberId === currentDeviceId) + 1
-    const feedbackRank = feedbackSorted.findIndex((m) => m.memberId === currentDeviceId) + 1
+    const tokenRank = tokenSorted.findIndex((m) => m.memberName === currentMemberName) + 1
+    const feedbackRank = feedbackSorted.findIndex((m) => m.memberName === currentMemberName) + 1
 
     // Overall rank based on average of token and feedback ranks
     const memberRanks = membersWithAggregated.map((m) => {
-      const tRank = tokenSorted.findIndex((x) => x.memberId === m.memberId) + 1
-      const fRank = feedbackSorted.findIndex((x) => x.memberId === m.memberId) + 1
+      const tRank = tokenSorted.findIndex((x) => x.memberName === m.memberName) + 1
+      const fRank = feedbackSorted.findIndex((x) => x.memberName === m.memberName) + 1
       return {
-        memberId: m.memberId,
+        memberName: m.memberName,
         avgRank: (tRank + fRank) / 2,
       }
     })
     memberRanks.sort((a, b) => a.avgRank - b.avgRank)
-    const overallRank = memberRanks.findIndex((m) => m.memberId === currentDeviceId) + 1
+    const overallRank = memberRanks.findIndex((m) => m.memberName === currentMemberName) + 1
 
     return {
       tokenRank,
@@ -137,7 +140,7 @@ export function TeamRankingCard({ onClick }: TeamRankingCardProps) {
       overallRank,
       totalMembers: leaderboard.members.length,
     }
-  }, [leaderboard, currentMember, currentDeviceId])
+  }, [leaderboard, currentMember, currentMemberName])
 
   const { overallRank, totalMembers, tokenRank, feedbackRank } = ranks
 

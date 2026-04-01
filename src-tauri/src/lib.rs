@@ -424,6 +424,8 @@ pub fn run() {
             #[cfg(feature = "p2p")]
             commands::team_p2p::get_device_info,
             #[cfg(feature = "p2p")]
+            commands::team_p2p::get_device_hostname,
+            #[cfg(feature = "p2p")]
             commands::team_p2p::team_add_member,
             #[cfg(feature = "p2p")]
             commands::team_p2p::team_remove_member,

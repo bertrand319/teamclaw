@@ -196,6 +196,11 @@ pub async fn get_device_node_id(iroh_state: tauri::State<'_, IrohState>) -> Resu
     Ok(get_node_id(node))
 }
 
+#[tauri::command]
+pub fn get_device_hostname() -> String {
+    get_device_metadata().hostname
+}
+
 // ─── File Helpers ────────────────────────────────────────────────────────
 
 /// Collect all files recursively from a directory, returning (relative_path, content) pairs.

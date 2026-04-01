@@ -342,7 +342,18 @@ pub async fn telemetry_export_team_feedback(
 
         let summary = db.export_feedback_summary().await?;
 
-        let member_name = device_info.hostname.clone();
+        let team_dir_str = team_dir.to_string_lossy().to_string();
+        let member_name = crate::commands::team_p2p::read_members_manifest(&team_dir_str)
+            .ok()
+            .flatten()
+            .and_then(|m| {
+                m.members
+                    .iter()
+                    .find(|mem| mem.node_id == node_id)
+                    .map(|mem| mem.name.clone())
+            })
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| device_info.hostname.clone());
 
         let export = MemberFeedbackExport {
             member_id: node_id.clone(),
@@ -556,7 +567,19 @@ pub async fn telemetry_export_leaderboard(
             session_count: local_stats.sessions.total,
         };
 
-        let member_name = device_info.hostname.clone();
+        let team_dir_str = team_dir.to_string_lossy().to_string();
+        let member_name = crate::commands::team_p2p::read_members_manifest(&team_dir_str)
+            .ok()
+            .flatten()
+            .and_then(|m| {
+                m.members
+                    .iter()
+                    .find(|mem| mem.node_id == node_id)
+                    .map(|mem| mem.name.clone())
+            })
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| device_info.hostname.clone());
+
         let safe_filename = member_name
             .replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_")
             .chars()

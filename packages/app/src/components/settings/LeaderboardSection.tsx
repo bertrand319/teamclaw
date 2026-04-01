@@ -163,8 +163,8 @@ export function LeaderboardSection() {
 
     return membersWithAggregated.map((m) => ({
       name: m.memberName || 'Unknown',
-      tokenRank: tokenSorted.findIndex((x) => x.memberId === m.memberId) + 1,
-      feedbackRank: feedbackSorted.findIndex((x) => x.memberId === m.memberId) + 1,
+      tokenRank: tokenSorted.findIndex((x) => x.memberName === m.memberName) + 1,
+      feedbackRank: feedbackSorted.findIndex((x) => x.memberName === m.memberName) + 1,
       totalTokens: m.aggregated.totalTokens,
       totalFeedbacks: m.aggregated.totalFeedbacks,
       totalCost: m.aggregated.totalCost,
