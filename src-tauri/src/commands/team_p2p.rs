@@ -231,6 +231,16 @@ impl SyncEngine {
     }
 }
 
+fn disconnected_engine_snapshot(mut snapshot: EngineSnapshot) -> EngineSnapshot {
+    snapshot.status = EngineStatus::Disconnected;
+    snapshot.stream_health = StreamHealth::Dead;
+    snapshot.last_sync_at = None;
+    snapshot.peers.clear();
+    snapshot.synced_files = 0;
+    snapshot.pending_files = 0;
+    snapshot
+}
+
 /// Shared, async-safe handle to the sync engine.
 pub type SyncEngineState = Arc<Mutex<SyncEngine>>;
 
@@ -3789,9 +3799,44 @@ pub async fn save_p2p_config(
 #[tauri::command]
 pub async fn p2p_node_status(
     engine_state: tauri::State<'_, SyncEngineState>,
+    iroh_state: tauri::State<'_, IrohState>,
+    opencode_state: tauri::State<'_, crate::commands::opencode::OpenCodeState>,
 ) -> Result<EngineSnapshot, String> {
-    let eng = engine_state.lock().await;
-    Ok(eng.snapshot())
+    let snapshot = {
+        let eng = engine_state.lock().await;
+        eng.snapshot()
+    };
+
+    let workspace_path = opencode_state
+        .inner
+        .lock()
+        .map_err(|e| e.to_string())?
+        .workspace_path
+        .clone();
+
+    let Some(workspace_path) = workspace_path else {
+        return Ok(disconnected_engine_snapshot(snapshot));
+    };
+
+    let config = read_p2p_config(&workspace_path)?.unwrap_or_default();
+    let active_namespace = {
+        let guard = iroh_state.lock().await;
+        guard
+            .as_ref()
+            .and_then(|node| node.active_doc.as_ref().map(|doc| doc.id().to_string()))
+    };
+
+    let workspace_matches_active_doc = match (config.namespace_id.as_deref(), active_namespace.as_deref())
+    {
+        (Some(config_ns), Some(active_ns)) => config_ns == active_ns,
+        _ => false,
+    };
+
+    if workspace_matches_active_doc {
+        Ok(snapshot)
+    } else {
+        Ok(disconnected_engine_snapshot(snapshot))
+    }
 }
 
 /// Get the current team sync status.
@@ -6056,6 +6101,39 @@ mod tests {
         assert_eq!(snap.stream_health, StreamHealth::Healthy);
         assert_eq!(snap.synced_files, 42);
         assert!(snap.peers.is_empty());
+    }
+
+    #[test]
+    fn test_disconnected_engine_snapshot_masks_connected_state() {
+        let snapshot = EngineSnapshot {
+            status: EngineStatus::Connected,
+            stream_health: StreamHealth::Healthy,
+            uptime_secs: 123,
+            restart_count: 2,
+            last_sync_at: Some("2024-01-01T00:00:00Z".into()),
+            peers: vec![PeerInfo {
+                node_id: "peer-1".into(),
+                name: "Alice".into(),
+                role: MemberRole::Editor,
+                connection: PeerConnection::Active,
+                last_seen_secs_ago: 1,
+                entries_sent: 5,
+                entries_received: 8,
+            }],
+            synced_files: 9,
+            pending_files: 4,
+        };
+
+        let masked = disconnected_engine_snapshot(snapshot);
+
+        assert_eq!(masked.status, EngineStatus::Disconnected);
+        assert_eq!(masked.stream_health, StreamHealth::Dead);
+        assert_eq!(masked.uptime_secs, 123);
+        assert_eq!(masked.restart_count, 2);
+        assert_eq!(masked.last_sync_at, None);
+        assert!(masked.peers.is_empty());
+        assert_eq!(masked.synced_files, 0);
+        assert_eq!(masked.pending_files, 0);
     }
 
     #[test]
