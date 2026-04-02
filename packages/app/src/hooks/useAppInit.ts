@@ -466,6 +466,7 @@ export function useP2pAutoReconnect() {
         // Initialize engine store so sidebar icon and popover reflect connection state
         const { useP2pEngineStore } = await import("@/stores/p2p-engine");
         await useP2pEngineStore.getState().init();
+        await useP2pEngineStore.getState().fetch();
 
         console.log("[P2P] Auto-reconnect completed");
       } catch (err) {
