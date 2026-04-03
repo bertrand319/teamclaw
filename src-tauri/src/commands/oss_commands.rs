@@ -330,12 +330,7 @@ pub async fn oss_create_team(
                 "teamSecret": fc_team_secret,
                 "teamName": fc_team_name,
             });
-            match client
-                .post(&setup_url)
-                .json(&setup_body)
-                .send()
-                .await
-            {
+            match client.post(&setup_url).json(&setup_body).send().await {
                 Ok(r) => tracing::info!("LiteLLM via FC: setup-team HTTP status={}", r.status()),
                 Err(e) => tracing::warn!("LiteLLM via FC: setup-team request failed: {e}"),
             }
@@ -347,13 +342,11 @@ pub async fn oss_create_team(
                 "nodeId": fc_node_id,
                 "memberName": fc_owner_name,
             });
-            match client
-                .post(&add_url)
-                .json(&member_body)
-                .send()
-                .await
-            {
-                Ok(r) => tracing::info!("LiteLLM via FC: add-member (owner) HTTP status={}", r.status()),
+            match client.post(&add_url).json(&member_body).send().await {
+                Ok(r) => tracing::info!(
+                    "LiteLLM via FC: add-member (owner) HTTP status={}",
+                    r.status()
+                ),
                 Err(e) => tracing::warn!("LiteLLM via FC: add-member (owner) request failed: {e}"),
             }
         });
@@ -559,13 +552,11 @@ pub async fn oss_join_team(
                 "teamSecret": fc_team_secret,
                 "nodeId": fc_node_id,
             });
-            match client
-                .post(&add_url)
-                .json(&body)
-                .send()
-                .await
-            {
-                Ok(r) => tracing::info!("LiteLLM via FC: add-member (join) HTTP status={}", r.status()),
+            match client.post(&add_url).json(&body).send().await {
+                Ok(r) => tracing::info!(
+                    "LiteLLM via FC: add-member (join) HTTP status={}",
+                    r.status()
+                ),
                 Err(e) => tracing::warn!("LiteLLM via FC: add-member (join) request failed: {e}"),
             }
         });

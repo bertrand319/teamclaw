@@ -535,10 +535,22 @@ pub async fn start_opencode_inner(
         .map_err(|e| format!("Failed to create sidecar command: {}", e))?
         .args(["serve", "--port", &port_str])
         .current_dir(&workspace_path)
-        .env("XDG_DATA_HOME", xdg_base.join("data").to_string_lossy().as_ref())
-        .env("XDG_CONFIG_HOME", xdg_base.join("config").to_string_lossy().as_ref())
-        .env("XDG_STATE_HOME", xdg_base.join("state").to_string_lossy().as_ref())
-        .env("XDG_CACHE_HOME", xdg_base.join("cache").to_string_lossy().as_ref());
+        .env(
+            "XDG_DATA_HOME",
+            xdg_base.join("data").to_string_lossy().as_ref(),
+        )
+        .env(
+            "XDG_CONFIG_HOME",
+            xdg_base.join("config").to_string_lossy().as_ref(),
+        )
+        .env(
+            "XDG_STATE_HOME",
+            xdg_base.join("state").to_string_lossy().as_ref(),
+        )
+        .env(
+            "XDG_CACHE_HOME",
+            xdg_base.join("cache").to_string_lossy().as_ref(),
+        );
     // Inject device identity as environment variables
     if let Ok(device_id) = super::oss_commands::get_or_create_fallback_device_id() {
         sidecar_command = sidecar_command.env("device_id", &device_id);
@@ -598,10 +610,7 @@ pub async fn start_opencode_inner(
                 }
                 CommandEvent::Terminated(payload) => {
                     let code = payload.code.unwrap_or(-1);
-                    eprintln!(
-                        "[OpenCode] Process terminated with code: {}",
-                        code
-                    );
+                    eprintln!("[OpenCode] Process terminated with code: {}", code);
                     if code != 0 {
                         let context = if stderr_lines.is_empty() {
                             format!("OpenCode process exited with code {}", code)
@@ -950,7 +959,10 @@ fn remove_non_native_desktop_control_skills(skills_dir: &std::path::Path) {
         let path = skills_dir.join(name);
         if path.is_dir() {
             match std::fs::remove_dir_all(&path) {
-                Ok(()) => println!("[Skills] Removed non-native desktop skill directory '{}'", name),
+                Ok(()) => println!(
+                    "[Skills] Removed non-native desktop skill directory '{}'",
+                    name
+                ),
                 Err(e) => println!(
                     "[Skills] Warning: could not remove '{}': {}",
                     path.display(),
@@ -1457,8 +1469,8 @@ pub async fn stop_opencode(state: State<'_, OpenCodeState>) -> Result<(), String
 
 fn get_opencode_db_path(workspace_path: &str) -> Result<String, String> {
     // With XDG isolation, the DB lives at <workspace>/.opencode/data/opencode/opencode.db
-    let isolated_path = std::path::PathBuf::from(workspace_path)
-        .join(".opencode/data/opencode/opencode.db");
+    let isolated_path =
+        std::path::PathBuf::from(workspace_path).join(".opencode/data/opencode/opencode.db");
     if isolated_path.exists() {
         return Ok(isolated_path.to_string_lossy().to_string());
     }
