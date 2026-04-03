@@ -358,7 +358,7 @@ pub async fn start_opencode_inner(
         let did = device_id.clone();
         if let Err(e) = tokio::task::spawn_blocking(move || {
             super::env_vars::ensure_system_env_vars(&ws, &did)
-        }).await.map_err(|e| e.to_string()).and_then(|r| r) {
+        }).await.map_err(|e| e.to_string()).and_then(|r| r.map_err(|e| e)) {
             eprintln!("[OpenCode] Warning: failed to ensure system env vars: {}", e);
         }
     }
@@ -414,15 +414,11 @@ pub async fn start_opencode_inner(
 
     // Keyring retry logic (unchanged from original)
     if !failed_keys.is_empty() {
-        if failed_keys == ["__blob__"] {
-            println!("[OpenCode] Keychain blob unavailable, retrying after keychain unlock...");
-        } else {
-            println!(
-                "[OpenCode] {} secret(s) failed to read ({:?}), retrying after keychain unlock...",
-                failed_keys.len(),
-                failed_keys
-            );
-        }
+        println!(
+            "[OpenCode] {} secret(s) failed to read ({:?}), retrying after keychain unlock...",
+            failed_keys.len(),
+            failed_keys
+        );
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
         let ws_retry = workspace_path.clone();
@@ -435,15 +431,11 @@ pub async fn start_opencode_inner(
                 });
 
         if !still_failed.is_empty() {
-            if still_failed == ["__blob__"] {
-                eprintln!("[OpenCode] Warning: keychain blob still unavailable after retry");
-            } else {
-                eprintln!(
-                    "[OpenCode] Warning: {} secret(s) still unavailable after retry: {:?}",
-                    still_failed.len(),
-                    still_failed
-                );
-            }
+            eprintln!(
+                "[OpenCode] Warning: {} secret(s) still unavailable after retry: {:?}",
+                still_failed.len(),
+                still_failed
+            );
         }
 
         secrets = retry_secrets;
@@ -525,15 +517,9 @@ pub async fn start_opencode_inner(
 
     // Build sidecar command, also injecting secrets as process env vars (backup)
     //
-    // Selective XDG isolation: only redirect DATA and STATE directories into
-    // <workspace>/.opencode/ to isolate OpenCode's database and session state.
-    // CONFIG and CACHE are left at system defaults so that child processes
-    // spawned by OpenCode's bash tool (gh, git, ssh, etc.) can still find
-    // their credentials and configuration.
-    //
-    // OPENCODE_CONFIG_DIR is set so that "global" skills installed under the
-    // workspace-local config path are still discoverable by OpenCode without
-    // overriding XDG_CONFIG_HOME (which would break gh, git, etc.).
+    // XDG isolation: redirect all OpenCode data/config/state/cache directories
+    // into <workspace>/.opencode/ so each workspace is fully self-contained
+    // and independent of any system-installed OpenCode.
     let xdg_base = std::path::PathBuf::from(&workspace_path).join(".opencode");
     let mut sidecar_command = app
         .shell()
@@ -542,8 +528,9 @@ pub async fn start_opencode_inner(
         .args(["serve", "--port", &port_str])
         .current_dir(&workspace_path)
         .env("XDG_DATA_HOME", xdg_base.join("data").to_string_lossy().as_ref())
+        .env("XDG_CONFIG_HOME", xdg_base.join("config").to_string_lossy().as_ref())
         .env("XDG_STATE_HOME", xdg_base.join("state").to_string_lossy().as_ref())
-        .env("OPENCODE_CONFIG_DIR", xdg_base.join("config").join("opencode").to_string_lossy().as_ref());
+        .env("XDG_CACHE_HOME", xdg_base.join("cache").to_string_lossy().as_ref());
     // Inject device identity as environment variables
     if let Ok(device_id) = super::oss_commands::get_or_create_fallback_device_id() {
         sidecar_command = sidecar_command.env("device_id", &device_id);
