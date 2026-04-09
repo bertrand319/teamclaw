@@ -38,9 +38,7 @@ use tauri_plugin_aptabase::EventTracker;
 use tauri_plugin_global_shortcut::{Code, Modifiers, ShortcutState};
 
 mod commands;
-mod rag;
 pub mod sentry_utils;
-mod stt;
 mod telemetry;
 
 /// Get the mtime of the user's shell profile file as a u64 (seconds since epoch).
@@ -168,12 +166,10 @@ fn fix_path_env() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    #[cfg(debug_assertions)]
     let startup_t0 = std::time::Instant::now();
 
     // Fix PATH before anything else so all child processes can find tools
     fix_path_env();
-    #[cfg(debug_assertions)]
     eprintln!(
         "[Startup] fix_path_env: {:.1}ms",
         startup_t0.elapsed().as_secs_f64() * 1000.0
@@ -274,7 +270,7 @@ pub fn run() {
         .manage(rag_state)
         .manage(telemetry::commands::TelemetryState::default())
         .manage(telemetry::commands::IdentityState::default())
-        .manage(crate::stt::SttState::default())
+        .manage(teamclaw_stt::SttState::default())
         .manage({
             #[allow(unused_mut)]
             let mut wvm = commands::webview::WebviewManager::default();
@@ -557,7 +553,6 @@ pub fn run() {
             commands::team_unified::unified_team_get_my_role,
         ])
         .setup(|app| {
-            #[cfg(debug_assertions)]
             let setup_t0 = std::time::Instant::now();
 
             // Register aptabase here (inside setup) so the Tokio runtime is available
@@ -580,7 +575,7 @@ pub fn run() {
             #[cfg(feature = "p2p")]
             {
                 let p2p_enabled = commands::opencode::read_last_workspace()
-                    .and_then(|ws| commands::team_p2p::read_p2p_config(&ws).ok().flatten())
+                    .and_then(|ws| commands::team_p2p::read_p2p_config(&ws, commands::TEAMCLAW_DIR, commands::CONFIG_FILE_NAME).ok().flatten())
                     .map(|c| c.enabled)
                     .unwrap_or(false);
 
@@ -609,7 +604,6 @@ pub fn run() {
             // since workspace_path is not available at setup time.
             // The frontend calls team_sync_repo on startup when team config is enabled.
 
-            #[cfg(debug_assertions)]
             eprintln!("[Startup] Setup hook (before early launch): {:.1}ms", setup_t0.elapsed().as_secs_f64() * 1000.0);
 
             // --- Early sidecar launch ---

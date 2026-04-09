@@ -33,6 +33,20 @@ async fn get_p2p_node_id(iroh_state: &State<'_, IrohState>) -> Result<String, St
     get_device_id()
 }
 
+/// Derive node ID (Ed25519 public key, hex-encoded) from 32-byte secret key.
+#[cfg(feature = "p2p")]
+fn secret_key_to_node_id(bytes: &[u8; 32]) -> (String, Vec<u8>) {
+    let sk = teamclaw_p2p::iroh::SecretKey::from_bytes(bytes);
+    (sk.public().to_string(), sk.to_bytes().to_vec())
+}
+
+#[cfg(not(feature = "p2p"))]
+fn secret_key_to_node_id(bytes: &[u8; 32]) -> (String, Vec<u8>) {
+    // Without iroh, derive via raw hex of the Ed25519 secret key bytes.
+    // The 32-byte file IS the identity; hex-encode for a stable device ID.
+    (hex::encode(bytes), bytes.to_vec())
+}
+
 /// Load (or create) the iroh secret key and return the node ID
 /// (hex-encoded Ed25519 public key). This is the canonical device identity
 /// — no UUID fallback.
@@ -46,24 +60,22 @@ pub(crate) fn get_device_id() -> Result<String, String> {
         let mut bytes = [0u8; 32];
         getrandom::getrandom(&mut bytes)
             .map_err(|e| format!("Failed to generate random bytes: {e}"))?;
-        let secret_key = iroh::SecretKey::from_bytes(&bytes);
+        let (node_id, key_bytes) = secret_key_to_node_id(&bytes);
         let dir = key_path.parent().unwrap();
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("Failed to create iroh dir: {e}"))?;
-        std::fs::write(&key_path, secret_key.to_bytes())
+        std::fs::write(&key_path, &key_bytes)
             .map_err(|e| format!("Failed to write iroh secret key: {e}"))?;
-        let node_id = secret_key.public();
         info!("Generated new iroh secret key, node_id: {node_id}");
-        return Ok(node_id.to_string());
+        return Ok(node_id);
     }
     let bytes = std::fs::read(&key_path)
         .map_err(|e| format!("Failed to read iroh secret key: {e}"))?;
     let bytes: [u8; 32] = bytes
         .try_into()
         .map_err(|_| "Secret key file has invalid length".to_string())?;
-    let secret_key = iroh::SecretKey::from_bytes(&bytes);
-    let node_id = secret_key.public();
-    Ok(node_id.to_string())
+    let (node_id, _) = secret_key_to_node_id(&bytes);
+    Ok(node_id)
 }
 
 /// Tauri command: return the device ID (iroh node_id).
@@ -202,7 +214,10 @@ pub async fn oss_create_team(
         force_path_style,
         workspace_path.clone(),
         Duration::from_secs(300),
-        Some(app_handle.clone()),
+        super::TEAMCLAW_DIR.to_string(),
+        super::TEAM_REPO_DIR.to_string(),
+        super::CONFIG_FILE_NAME.to_string(),
+        Some(tauri_emitter(app_handle.clone())),
     );
 
     // Call FC /register
@@ -231,7 +246,10 @@ pub async fn oss_create_team(
         force_path_style,
         workspace_path.clone(),
         Duration::from_secs(300),
-        Some(app_handle.clone()),
+        super::TEAMCLAW_DIR.to_string(),
+        super::TEAM_REPO_DIR.to_string(),
+        super::CONFIG_FILE_NAME.to_string(),
+        Some(tauri_emitter(app_handle.clone())),
     );
     manager.set_credentials(resp.credentials.clone(), resp.oss.clone());
     manager.set_role(MemberRole::Owner);
@@ -409,7 +427,10 @@ pub async fn oss_join_team(
         force_path_style,
         workspace_path.clone(),
         Duration::from_secs(300),
-        Some(app_handle.clone()),
+        super::TEAMCLAW_DIR.to_string(),
+        super::TEAM_REPO_DIR.to_string(),
+        super::CONFIG_FILE_NAME.to_string(),
+        Some(tauri_emitter(app_handle.clone())),
     );
 
     let body = serde_json::json!({
@@ -632,7 +653,10 @@ pub async fn oss_restore_sync(
         config.force_path_style,
         workspace_path.clone(),
         Duration::from_secs(config.poll_interval_secs),
-        Some(app_handle.clone()),
+        super::TEAMCLAW_DIR.to_string(),
+        super::TEAM_REPO_DIR.to_string(),
+        super::CONFIG_FILE_NAME.to_string(),
+        Some(tauri_emitter(app_handle.clone())),
     );
 
     // ── Phase 1: Connect (get FC token — proves auth + network) ────────
