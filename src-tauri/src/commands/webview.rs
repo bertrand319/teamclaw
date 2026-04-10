@@ -49,7 +49,8 @@ impl Default for WebviewManager {
 /// - WKWebsiteDataStore (defaultDataStore) → persistent cookies, localStorage shared
 #[cfg(target_os = "macos")]
 pub fn init_shared_config(manager: &mut WebviewManager) {
-    use objc2::MainThreadMarker;
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send, MainThreadMarker};
     use objc2_web_kit::{WKWebViewConfiguration, WKWebsiteDataStore};
 
     let mtm =
@@ -62,11 +63,25 @@ pub fn init_shared_config(manager: &mut WebviewManager) {
         // share a single global process pool automatically.
         let data_store = WKWebsiteDataStore::defaultDataStore(mtm);
         config.setWebsiteDataStore(&data_store);
+
+        // Disable "Inspect Element" in the native context menu.
+        // The docked Web Inspector breaks our layout because it attempts to
+        // resize the WKWebView to accommodate itself, overflowing outside the
+        // panel bounds we set via webview_set_bounds. Users who need devtools
+        // can use Tauri's own devtools (Cmd+Option+I on the main window).
+        let prefs = config.preferences();
+        let prefs_ptr: *mut AnyObject = objc2::rc::Retained::as_ptr(&prefs) as *mut AnyObject;
+        let ns_false: *mut AnyObject = msg_send![class!(NSNumber), numberWithBool: false];
+        let key_str = std::ffi::CString::new("developerExtrasEnabled").unwrap();
+        let key_ns: *mut AnyObject =
+            msg_send![class!(NSString), stringWithUTF8String: key_str.as_ptr()];
+        let _: () = msg_send![prefs_ptr, setValue: ns_false, forKey: key_ns];
+
         let raw = objc2::rc::Retained::as_ptr(&config) as *const std::ffi::c_void;
         objc2::ffi::objc_retain(raw as *mut _);
         manager.shared_config = Some(SharedConfig(raw));
     }
-    eprintln!("[Webview] Shared WKWebViewConfiguration initialized on main thread (defaultDataStore + shared pool)");
+    eprintln!("[Webview] Shared WKWebViewConfiguration initialized on main thread (defaultDataStore + shared pool, devtools disabled)");
 }
 
 /// Execute JavaScript in the main webview and return the stringified result.
@@ -252,6 +267,29 @@ pub async fn webview_create(
   };
 })();"#,
     );
+
+    // Page load progress via on_page_load callback (no JS injection needed —
+    // child webviews don't have __TAURI_INTERNALS__)
+    {
+        let progress_label = label.clone();
+        webview_builder = webview_builder.on_page_load(move |webview, payload| {
+            use tauri::Emitter;
+            let progress = match payload.event() {
+                tauri::webview::PageLoadEvent::Started => 30,
+                tauri::webview::PageLoadEvent::Finished => 100,
+            };
+            let _ = webview.emit(
+                "webview-progress",
+                serde_json::json!({
+                    "label": progress_label,
+                    "progress": progress
+                }),
+            );
+        });
+    }
+
+    // Right-click: rely on the native WKWebView / WebView2 context menu.
+    // No custom init script needed — native menus provide Copy/Paste/Look Up/etc.
 
     // Inject window.teamclaw identity global before any page scripts run.
     // Non-fatal: if device_token generation fails (e.g. DEVICE_JWT_SECRET not configured),
@@ -441,3 +479,126 @@ pub async fn webview_get_url(app: tauri::AppHandle, label: String) -> Result<Str
     }
     Err("Webview not found".to_string())
 }
+
+/// Get the page title of a child webview via native platform API.
+/// Child webviews loading external URLs don't have __TAURI_INTERNALS__,
+/// so we read the title directly from the native WKWebView / WebView2.
+#[tauri::command]
+pub async fn webview_get_title(app: tauri::AppHandle, label: String) -> Result<String, String> {
+    let webview = app
+        .get_webview(&label)
+        .ok_or_else(|| "Webview not found".to_string())?;
+
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+
+    webview
+        .with_webview(move |wv| {
+            #[cfg(target_os = "macos")]
+            {
+                use objc2::msg_send;
+                use objc2::runtime::AnyObject;
+                unsafe {
+                    let wk_webview: *const AnyObject = wv.inner().cast();
+                    let ns_title: *const AnyObject = msg_send![wk_webview, title];
+                    if !ns_title.is_null() {
+                        let utf8: *const std::ffi::c_char = msg_send![ns_title, UTF8String];
+                        if !utf8.is_null() {
+                            let s = std::ffi::CStr::from_ptr(utf8).to_string_lossy().to_string();
+                            let _ = tx.send(s);
+                            return;
+                        }
+                    }
+                }
+                let _ = tx.send(String::new());
+            }
+            #[cfg(target_os = "windows")]
+            {
+                // WebView2: access ICoreWebView2 DocumentTitle via with_webview
+                // For now, return empty — will be improved when testing on Windows
+                let _ = wv; // suppress unused warning
+                let _ = tx.send(String::new());
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            {
+                let _ = wv;
+                let _ = tx.send(String::new());
+            }
+        })
+        .map_err(|e| e.to_string())?;
+
+    // with_webview dispatches to the main thread, wait for result
+    match rx.recv_timeout(std::time::Duration::from_secs(2)) {
+        Ok(title) => Ok(title),
+        Err(_) => Ok(String::new()),
+    }
+}
+
+/// Get the favicon URL for a child webview.
+/// Derives from the webview's current URL origin — no JS eval needed
+/// since child webviews don't have __TAURI_INTERNALS__.
+#[tauri::command]
+pub async fn webview_get_favicon(app: tauri::AppHandle, label: String) -> Result<String, String> {
+    if let Some(webview) = app.get_webview(&label) {
+        let url = webview.url().map_err(|e| format!("{}", e))?;
+        if let Some(host) = url.host_str() {
+            let scheme = url.scheme();
+            let port = url
+                .port()
+                .map(|p| format!(":{}", p))
+                .unwrap_or_default();
+            return Ok(format!("{}://{}{}/favicon.ico", scheme, host, port));
+        }
+    }
+    Ok(String::new())
+}
+
+/// Find text in a child webview page.
+/// Fire-and-forget: window.find() highlights matches visually.
+/// Returns true always (we can't get the result back from external webviews
+/// since __TAURI_INTERNALS__ is not available).
+#[tauri::command]
+pub async fn webview_find_in_page(
+    app: tauri::AppHandle,
+    label: String,
+    query: String,
+    forward: bool,
+) -> Result<bool, String> {
+    if let Some(webview) = app.get_webview(&label) {
+        let escaped_query = serde_json::to_string(&query).unwrap_or_else(|_| "\"\"".to_string());
+        let backward = if forward { "false" } else { "true" };
+        let js = format!(
+            "window.find({}, false, {}, true, false, false, false)",
+            escaped_query, backward
+        );
+        webview
+            .eval(&js)
+            .map_err(|e| format!("Failed to eval: {}", e))?;
+    }
+    // Can't get result back from external webview, assume found
+    Ok(true)
+}
+
+/// Clear find-in-page highlights in a child webview.
+#[tauri::command]
+pub async fn webview_clear_find(app: tauri::AppHandle, label: String) -> Result<(), String> {
+    if let Some(webview) = app.get_webview(&label) {
+        let _ = webview.eval("window.getSelection().removeAllRanges()");
+    }
+    Ok(())
+}
+
+/// Set the zoom level of a child webview.
+#[tauri::command]
+pub async fn webview_set_zoom(
+    app: tauri::AppHandle,
+    label: String,
+    level: f64,
+) -> Result<(), String> {
+    if let Some(webview) = app.get_webview(&label) {
+        let _ = webview.eval(&format!("document.body.style.zoom = '{}'", level));
+    }
+    Ok(())
+}
+
+// Context menu: using native WKWebView / WebView2 built-in context menu.
+// No custom Rust handler needed — the native menu provides Copy/Paste/Look Up/etc.
