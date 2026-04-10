@@ -98,8 +98,7 @@ jobs:
             -clonedSourcePackagesDirPath build/SourcePackages \
             DEVELOPMENT_TEAM=43G5A6G9QV \
             CODE_SIGN_STYLE=Manual \
-            CODE_SIGN_IDENTITY="Apple Distribution" \
-            | tail -20
+            CODE_SIGN_IDENTITY="Apple Distribution"
 
       # ── Export IPA ──
       - name: Export IPA
@@ -108,8 +107,9 @@ jobs:
           xcodebuild -exportArchive \
             -archivePath build/TeamClawMobile.xcarchive \
             -exportPath build/export \
-            -exportOptionsPlist ExportOptions.plist \
-            | tail -10
+            -exportOptionsPlist ExportOptions.plist
+
+          ls -la build/export/
 
       # ── Upload to TestFlight ──
       - name: Upload to TestFlight
@@ -123,6 +123,11 @@ jobs:
           echo "$APP_STORE_CONNECT_API_KEY_P8" > ~/.appstoreconnect/private_keys/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8
 
           IPA_PATH=$(find TeamClawMobile/build/export -name "*.ipa" | head -1)
+          if [ -z "$IPA_PATH" ]; then
+            echo "Error: No IPA found in TeamClawMobile/build/export/"
+            ls -la TeamClawMobile/build/export/ 2>/dev/null || echo "Export directory does not exist"
+            exit 1
+          fi
           echo "Uploading: $IPA_PATH"
 
           xcrun altool --upload-app \

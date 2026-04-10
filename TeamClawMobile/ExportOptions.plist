@@ -6,6 +6,15 @@
 	<string>app-store-connect</string>
 	<key>teamID</key>
 	<string>43G5A6G9QV</string>
+	<key>signingStyle</key>
+	<string>manual</string>
+	<key>provisioningProfiles</key>
+	<dict>
+		<key>tech.teamclaw.mobile</key>
+		<string>teamclaw profile</string>
+	</dict>
+	<key>signingCertificate</key>
+	<string>Apple Distribution</string>
 	<key>uploadSymbols</key>
 	<true/>
 	<key>destination</key>
