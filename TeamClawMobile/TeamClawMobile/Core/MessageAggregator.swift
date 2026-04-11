@@ -41,6 +41,8 @@ final class MessageAggregator {
             states[messageID]!.subject.send(assembled)
         case .error(let err):
             states[messageID]!.subject.send("[Error: \(err.message)]")
+        case .toolEvent, .hasThinking:
+            break
         case .none:
             break
         }
