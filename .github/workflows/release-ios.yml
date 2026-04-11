@@ -65,11 +65,11 @@ jobs:
       - name: Set version and build number
         working-directory: TeamClawMobile
         run: |
-          # Version from tag (v1.0.0 → 1.0.0) or fallback
+          # Version from root package.json (single source of truth)
+          VERSION=$(node -p "require('../package.json').version")
+          # Override with git tag if present
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             VERSION="${GITHUB_REF#refs/tags/v}"
-          else
-            VERSION="1.0.0"
           fi
 
           # Build number: input override or timestamp-based
