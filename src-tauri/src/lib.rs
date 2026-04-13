@@ -379,6 +379,8 @@ pub fn run() {
             commands::gateway::get_mqtt_relay_status,
             commands::gateway::generate_mqtt_pairing_code,
             commands::gateway::unpair_mqtt_device,
+            commands::gateway::load_shortcuts,
+            commands::gateway::save_shortcuts,
             commands::cron::cron_init,
             commands::cron::cron_list_jobs,
             commands::cron::cron_add_job,
@@ -584,6 +586,16 @@ pub fn run() {
                     eprintln!("[RAG HTTP] Failed to start HTTP server: {}", e);
                 }
             });
+
+            // Start introspect MCP internal API server
+            {
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = commands::introspect_api::start_introspect_api(app_handle).await {
+                        eprintln!("[IntrospectAPI] Failed to start: {}", e);
+                    }
+                });
+            }
 
             // Initialize iroh P2P node only when P2P team is configured.
             // Check the last workspace's config; if p2p.enabled != true, skip.
