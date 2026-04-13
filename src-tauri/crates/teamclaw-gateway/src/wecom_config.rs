@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(Default)]
 pub struct WeComConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -13,16 +14,6 @@ pub struct WeComConfig {
     pub encoding_aes_key: Option<String>,
 }
 
-impl Default for WeComConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            bot_id: String::new(),
-            secret: String::new(),
-            encoding_aes_key: None,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]

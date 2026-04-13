@@ -3,16 +3,13 @@ use serde::{Deserialize, Serialize};
 /// Email provider type
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum EmailProvider {
+    #[default]
     Gmail,
     Custom,
 }
 
-impl Default for EmailProvider {
-    fn default() -> Self {
-        Self::Gmail
-    }
-}
 
 /// Email channel configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,18 +120,15 @@ impl Default for EmailConfig {
 /// Email gateway status
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum EmailGatewayStatus {
+    #[default]
     Disconnected,
     Connecting,
     Connected,
     Error,
 }
 
-impl Default for EmailGatewayStatus {
-    fn default() -> Self {
-        Self::Disconnected
-    }
-}
 
 /// Email gateway status response
 #[derive(Debug, Clone, Serialize, Deserialize)]

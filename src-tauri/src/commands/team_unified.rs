@@ -101,14 +101,13 @@ async fn p2p_update_member_role_and_sync(
     }
 
     let previous_role = super::team_p2p::read_members_manifest(&team_dir)?
-        .map(|manifest| {
+        .and_then(|manifest| {
             manifest
                 .members
                 .into_iter()
                 .find(|member| member.node_id == node_id)
                 .map(|member| member.role)
         })
-        .flatten()
         .or_else(|| {
             super::team_p2p::read_p2p_config(
                 workspace_path,

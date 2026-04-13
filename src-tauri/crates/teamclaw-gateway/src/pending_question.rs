@@ -53,6 +53,12 @@ pub struct PendingQuestionStore {
 
 const EXPIRY_SECS: u64 = 360; // 6 minutes (> 5 min timeout)
 
+impl Default for PendingQuestionStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PendingQuestionStore {
     pub fn new() -> Self {
         Self {
