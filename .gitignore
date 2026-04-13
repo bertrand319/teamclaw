@@ -68,6 +68,7 @@ venv/
 # Misc
 *.lock
 !pnpm-lock.yaml
+!src-tauri/Cargo.lock
 logs
 playwright-report/
 screenshots/
