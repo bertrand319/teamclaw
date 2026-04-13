@@ -32,10 +32,8 @@ fn main() {
         let env_path = root_dir.join(format!("build.config.{}.json", build_env));
         println!("cargo:rerun-if-changed={}", env_path.display());
         if let Ok(s) = std::fs::read_to_string(&env_path) {
-            let env_config: serde_json::Value = serde_json::from_str(&s).expect(&format!(
-                "build.config.{}.json is not valid JSON",
-                build_env
-            ));
+            let env_config: serde_json::Value = serde_json::from_str(&s)
+                .unwrap_or_else(|_| panic!("build.config.{}.json is not valid JSON", build_env));
             deep_merge(&mut config, env_config);
         }
     }

@@ -245,14 +245,28 @@ const VIRTUAL_SCROLL_THRESHOLD = 200;
 interface FileTreeProps {
   filterText?: string;
   gitChangedOnly?: boolean;
+  /** Override tree nodes (e.g. for custom root). When provided, bypasses workspace store's fileTree. */
+  nodes?: import('@/stores/workspace').FileNode[];
+  /** Suppress git status decorations */
+  hideGitStatus?: boolean;
+  /** When set, shows an InlineInput at the top of the tree for creating a file or folder at root level */
+  rootCreating?: 'file' | 'folder' | null;
+  onRootCreateConfirm?: (name: string) => void;
+  onRootCreateCancel?: () => void;
 }
 
 export function FileTree({
   filterText = "",
   gitChangedOnly = false,
+  nodes: nodesProp,
+  hideGitStatus = false,
+  rootCreating,
+  onRootCreateConfirm,
+  onRootCreateCancel,
 }: FileTreeProps) {
   const { t } = useTranslation();
-  const fileTree = useWorkspaceStore(s => s.fileTree);
+  const storeFileTree = useWorkspaceStore(s => s.fileTree);
+  const fileTree = nodesProp ?? storeFileTree;
   const expandedPaths = useWorkspaceStore(s => s.expandedPaths);
   const loadingPaths = useWorkspaceStore(s => s.loadingPaths);
   const selectedFile = useWorkspaceStore(s => s.selectedFile);
@@ -276,6 +290,7 @@ export function FileTree({
   const { gitStatuses } = useGitStatus();
   const { showGitStatus, showStatusIcons, statusColors } =
     useGitSettingsStore();
+  const effectiveShowGitStatus = hideGitStatus ? false : showGitStatus;
   const parentRef = useRef<HTMLDivElement>(null);
   const treeContainerRef = useRef<HTMLDivElement>(null);
 
@@ -311,7 +326,7 @@ export function FileTree({
 
   // Pre-compute git data
   const { fileGitStatusMap, dirtyDirectories } = useMemo(() => {
-    if (!showGitStatus) {
+    if (!effectiveShowGitStatus) {
       return {
         fileGitStatusMap: new Map<string, GitStatus>(),
         dirtyDirectories: new Set<string>(),
@@ -332,7 +347,7 @@ export function FileTree({
     });
 
     return { fileGitStatusMap: fileMap, dirtyDirectories: dirtyDirs };
-  }, [showGitStatus, gitStatuses, workspacePath]);
+  }, [effectiveShowGitStatus, gitStatuses, workspacePath]);
 
   // Pre-compute sync status data for team files (merge OSS and P2P sources)
   const ossFileSyncStatusMap = useTeamOssStore(s => s.fileSyncStatusMap);
@@ -367,6 +382,16 @@ export function FileTree({
     }
     useWorkspaceStore.setState({ expandedPaths: nextExpanded });
   }, []);
+
+  const handleExpandDirectory = useCallback((path: string) => {
+    setFocusedPath(path);
+    expandDirectory(path);
+  }, [setFocusedPath, expandDirectory]);
+
+  const handleCollapseDirectory = useCallback((path: string) => {
+    setFocusedPath(path);
+    collapseDirectory(path);
+  }, [setFocusedPath, collapseDirectory]);
 
   // Context menu action handlers
   const handleNewFile = useCallback(
@@ -1208,8 +1233,8 @@ export function FileTree({
     onSelectFile: selectFile,
     onSelectFileRange: selectFileRange,
     onToggleFileSelection: toggleFileSelection,
-    onExpandDirectory: expandDirectory,
-    onCollapseDirectory: collapseDirectory,
+    onExpandDirectory: handleExpandDirectory,
+    onCollapseDirectory: handleCollapseDirectory,
     onNewFile: handleNewFile,
     onNewFolder: handleNewFolder,
     onRename: handleRename,
@@ -1238,6 +1263,21 @@ export function FileTree({
 
   const treeContent = !useVirtual ? (
     <div className="py-1">
+      {rootCreating && onRootCreateConfirm && onRootCreateCancel && (
+        <InlineInput
+          defaultValue={rootCreating === 'file' ? 'untitled' : 'new-folder'}
+          onConfirm={onRootCreateConfirm}
+          onCancel={onRootCreateCancel}
+          level={0}
+          icon={
+            rootCreating === 'file' ? (
+              <File className="h-4 w-4 shrink-0 text-muted-foreground" />
+            ) : (
+              <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground rotate-90" />
+            )
+          }
+        />
+      )}
       {flatNodes.map(({ node, level, compactName, compactedPaths }, index) => (
         <React.Fragment key={node.path}>
           <FileTreeItem {...buildItemProps(node, level, compactName, compactedPaths)} />
