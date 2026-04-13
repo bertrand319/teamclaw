@@ -1,6 +1,6 @@
 import * as React from "react"
 import { useTranslation } from "react-i18next"
-import { Search, SquarePen, MessageSquare, Loader2, Archive, PanelLeftIcon, FolderOpen, Users, Cloud, Pencil, Ellipsis, Clock, Bookmark, Settings, Pin, Shapes, } from "lucide-react"
+import { Search, SquarePen, MessageSquare, Loader2, Archive, PanelLeftIcon, FolderOpen, Users, Cloud, Pencil, Ellipsis, Clock, Bookmark, Settings, Pin, Shapes, BookOpen, } from "lucide-react"
 import { isWorkspaceUIVariant } from "@/lib/ui-variant"
 
 import { useSessionStore } from "@/stores/session"
@@ -525,7 +525,6 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
     [sessions, pinnedSessionIds],
   )
   
-  const advancedMode = useUIStore(s => s.advancedMode)
   const openSettings = useUIStore(s => s.openSettings)
   const closeSettings = useUIStore(s => s.closeSettings)
   const embeddedSettingsSection = useUIStore(s => s.embeddedSettingsSection)
@@ -569,15 +568,15 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
     }
   }
 
-  const handleOpenFilePanel = () => {
+  const handleOpenKnowledgePanel = () => {
     clearSelection()
     closeSettings()
     closeEmbeddedSettingsSection()
     useTabsStore.getState().hideAll()
-    if (isPanelOpen && activeWorkspacePanelTab === 'files') {
+    if (isPanelOpen && activeWorkspacePanelTab === 'knowledge') {
       closePanel()
     } else {
-      openPanel('files')
+      openPanel('knowledge')
     }
   }
 
@@ -586,9 +585,9 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
     activeWorkspacePanelTab === "shortcuts" &&
     !embeddedSettingsSection
 
-  const fileStripActive =
+  const knowledgeStripActive =
     isPanelOpen &&
-    activeWorkspacePanelTab === 'files' &&
+    activeWorkspacePanelTab === 'knowledge' &&
     !embeddedSettingsSection
 
   const handleSelectSession = (id: string) => {
@@ -939,27 +938,25 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                 </span>
               </Button>
 
-              {advancedMode && (
-                <Button
-                  variant="ghost"
-                  size="sm"
+              <Button
+                variant="ghost"
+                size="sm"
+                className={cn(
+                  'h-7 justify-start gap-1.5 px-2 font-normal',
+                  knowledgeStripActive && 'bg-primary/10 text-primary font-medium',
+                )}
+                onClick={handleOpenKnowledgePanel}
+              >
+                <BookOpen
                   className={cn(
-                    'h-7 justify-start gap-1.5 px-2 font-normal',
-                    fileStripActive && 'bg-primary/10 text-primary font-medium',
+                    'h-3.5 w-3.5 shrink-0',
+                    knowledgeStripActive ? 'text-emerald-500' : 'text-muted-foreground',
                   )}
-                  onClick={handleOpenFilePanel}
-                >
-                  <FolderOpen
-                    className={cn(
-                      'h-3.5 w-3.5 shrink-0',
-                      fileStripActive ? 'text-blue-500' : 'text-muted-foreground',
-                    )}
-                  />
-                  <span className="truncate text-xs">
-                    {t('navigation.files', 'Files')}
-                  </span>
-                </Button>
-              )}
+                />
+                <span className="truncate text-xs">
+                  {t('navigation.knowledge', 'Knowledge')}
+                </span>
+              </Button>
             </div>
           )}
           <div className="flex items-center justify-between">
