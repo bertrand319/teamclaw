@@ -3,6 +3,7 @@
 
 const { spawn } = require("child_process");
 const { createRustBuildEnv } = require("./rust-build-env");
+const { ensureTeamclawIntrospectSidecar } = require("./ensure-introspect-sidecar");
 const { platform } = process;
 
 const args = process.argv.slice(2);
@@ -31,6 +32,7 @@ if (isWindows && (sub === "dev" || sub === "build")) {
 }
 
 const env = createRustBuildEnv(process.env, __dirname);
+ensureTeamclawIntrospectSidecar(env, { logPrefix: "[tauri-cli]" });
 
 const child = spawn("pnpm", ["exec", "tauri", ...args], {
   stdio: "inherit",
