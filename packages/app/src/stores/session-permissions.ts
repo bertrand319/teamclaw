@@ -219,7 +219,6 @@ export function createPermissionActions(set: SessionSet, get: SessionGet) {
       }
 
       const {
-        activeSessionId,
         sessions: currentSessions,
         setActiveSession: navigateToSession,
       } = get();
