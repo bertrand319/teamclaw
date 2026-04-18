@@ -22,6 +22,8 @@ import {
 import {
   useStreamingStore,
 } from "@/stores/streaming";
+import { useLocalStatsStore } from "@/stores/local-stats";
+import { useWorkspaceStore } from "@/stores/workspace";
 import { sessionDataCache } from "./session-data-cache";
 import {
   buildTerminalInputQuestion,
@@ -34,6 +36,19 @@ import {
 
 type SessionSet = (fn: ((state: SessionState) => Partial<SessionState>) | Partial<SessionState>) => void;
 type SessionGet = () => SessionState;
+
+// Tracks toolCallIds already counted for skill telemetry so a single invocation
+// is counted exactly once, even though handleToolExecuting fires multiple times
+// (status: running → completed, and the first event often has empty args).
+const countedSkillToolCalls = new Set<string>();
+
+// Cap the set so it can't grow unbounded in a long-lived session.
+function markSkillCounted(toolCallId: string) {
+  if (countedSkillToolCalls.size > 10_000) {
+    countedSkillToolCalls.clear();
+  }
+  countedSkillToolCalls.add(toolCallId);
+}
 
 export function createToolHandlers(set: SessionSet, get: SessionGet) {
   return {
@@ -290,6 +305,31 @@ export function createToolHandlers(set: SessionSet, get: SessionGet) {
           ),
         };
       });
+
+      // Skill usage telemetry — fire-and-forget, never blocks streaming.
+      // handleToolExecuting fires multiple times per tool (running → completed);
+      // the first fire often has empty args, a later fire carries the name.
+      // We fire as soon as the name is populated and dedupe by toolCallId so
+      // each invocation is counted exactly once, regardless of final status.
+      if (
+        (toolNameLower === "skill" || toolNameLower === "role_skill") &&
+        !countedSkillToolCalls.has(event.toolCallId)
+      ) {
+        const args = event.arguments as
+          | { name?: unknown; skill?: unknown; skill_name?: unknown }
+          | undefined;
+        const rawName = args?.name ?? args?.skill ?? args?.skill_name;
+        const skillName = typeof rawName === "string" ? rawName : undefined;
+        if (skillName) {
+          const workspacePath = useWorkspaceStore.getState().workspacePath;
+          if (workspacePath) {
+            markSkillCounted(event.toolCallId);
+            void useLocalStatsStore
+              .getState()
+              .incrementSkillUsage(workspacePath, skillName);
+          }
+        }
+      }
     },
 
     forceCompleteToolCall: (toolCallId: string) => {

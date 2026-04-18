@@ -1,6 +1,6 @@
 import * as React from 'react'
 import { useTranslation } from 'react-i18next'
-import { Trophy, Flame, MessageSquareHeart, RefreshCw, Loader2 } from 'lucide-react'
+import { Trophy, Flame, MessageSquareHeart, Sparkles, RefreshCw, Loader2 } from 'lucide-react'
 import { cn, isTauri } from '@/lib/utils'
 import { TEAM_SYNCED_EVENT } from '@/lib/build-config'
 import { buildSharedRankMap } from '@/lib/team-leaderboard-ranks'
@@ -29,16 +29,17 @@ function formatTokens(tokens: number | undefined | null): string {
 
 // ── Types ──────────────────────────────────────────────────────────
 
-interface LeaderboardStats {
+export interface LeaderboardStats {
   totalFeedbacks: number
   positiveCount: number
   negativeCount: number
   totalTokens: number
   totalCost: number
   sessionCount: number
+  skillUsage?: Record<string, number>
 }
 
-interface MemberLeaderboardExport {
+export interface MemberLeaderboardExport {
   memberId: string
   memberName: string
   exportedAt: string
@@ -46,7 +47,7 @@ interface MemberLeaderboardExport {
   workspaces: Record<string, LeaderboardStats>  // workspace path -> stats
 }
 
-interface TeamLeaderboard {
+export interface TeamLeaderboard {
   members: MemberLeaderboardExport[]
 }
 
@@ -56,10 +57,12 @@ interface MemberStats {
   overallScore: number
   tokenRank: number
   feedbackRank: number
+  skillRank: number
   totalTokens: number
   totalFeedbacks: number
   totalCost: number
   sessionCount: number
+  totalSkillInvocations: number
   isCurrentUser?: boolean
 }
 
@@ -135,15 +138,19 @@ export function LeaderboardSection() {
       totalFeedbacks: 0,
       totalCost: 0,
       sessionCount: 0,
+      totalSkillInvocations: 0,
     }
-    
+
     Object.values(workspaces || {}).forEach(stats => {
       total.totalTokens += stats.totalTokens || 0
       total.totalFeedbacks += stats.totalFeedbacks || 0
       total.totalCost += stats.totalCost || 0
       total.sessionCount += stats.sessionCount || 0
+      for (const n of Object.values(stats.skillUsage || {})) {
+        total.totalSkillInvocations += n
+      }
     })
-    
+
     return total
   }, [])
 
@@ -167,10 +174,18 @@ export function LeaderboardSection() {
       getKey: (member) => member.memberName,
       getScore: (member) => member.aggregated.totalFeedbacks,
     })
+    const skillRanks = buildSharedRankMap({
+      items: membersWithAggregated,
+      getKey: (member) => member.memberName,
+      getScore: (member) => member.aggregated.totalSkillInvocations,
+    })
 
     const overallScores = membersWithAggregated.map((member) => ({
       memberName: member.memberName,
-      overallScore: ((tokenRanks.get(member.memberName) ?? 0) + (feedbackRanks.get(member.memberName) ?? 0)) / 2,
+      overallScore:
+        ((tokenRanks.get(member.memberName) ?? 0) +
+          (feedbackRanks.get(member.memberName) ?? 0) +
+          (skillRanks.get(member.memberName) ?? 0)) / 3,
     }))
     const overallScoreMap = new Map(
       overallScores.map((member) => [member.memberName, member.overallScore])
@@ -188,12 +203,19 @@ export function LeaderboardSection() {
       overallScore: overallScoreMap.get(member.memberName) ?? 0,
       tokenRank: tokenRanks.get(member.memberName) ?? 0,
       feedbackRank: feedbackRanks.get(member.memberName) ?? 0,
+      skillRank: skillRanks.get(member.memberName) ?? 0,
       totalTokens: member.aggregated.totalTokens,
       totalFeedbacks: member.aggregated.totalFeedbacks,
       totalCost: member.aggregated.totalCost,
       sessionCount: member.aggregated.sessionCount,
+      totalSkillInvocations: member.aggregated.totalSkillInvocations,
     }))
   }, [leaderboard, aggregateWorkspaceStats])
+
+  const topSkills = React.useMemo(
+    () => (leaderboard ? computeTopSkills(leaderboard, 10) : []),
+    [leaderboard],
+  )
 
   const teamSummary = React.useMemo(() => {
     const totalTokens = memberStats.reduce((sum, m) => sum + (m.totalTokens ?? 0), 0)
@@ -278,11 +300,12 @@ export function LeaderboardSection() {
         <>
           <div className="rounded-xl border bg-card overflow-hidden">
             {/* Table header */}
-            <div className="grid grid-cols-[40px_1fr_80px_100px_120px] items-center gap-2 px-4 py-2.5 bg-muted/30 border-b text-[11px] font-medium text-muted-foreground">
+            <div className="grid grid-cols-[40px_1fr_72px_72px_72px_112px] items-center gap-2 px-4 py-2.5 bg-muted/30 border-b text-[11px] font-medium text-muted-foreground">
               <span className="text-center">{t('settings.leaderboard.rank', '#')}</span>
               <span>{t('settings.leaderboard.member', 'Member')}</span>
               <span className="text-center">{t('settings.leaderboard.tokenRank', 'Token Rank')}</span>
               <span className="text-center">{t('settings.leaderboard.feedbackRank', 'Feedback Rank')}</span>
+              <span className="text-center">{t('settings.leaderboard.skillRank', 'Skill Rank')}</span>
               <span className="text-right">{t('settings.leaderboard.totalTokens', 'Total Tokens')}</span>
             </div>
 
@@ -300,7 +323,7 @@ export function LeaderboardSection() {
                   <div
                     key={member.name}
                     className={cn(
-                      "grid grid-cols-[40px_1fr_80px_100px_120px] items-center gap-2 px-4 py-2.5 border-b last:border-b-0 transition-colors",
+                      "grid grid-cols-[40px_1fr_72px_72px_72px_112px] items-center gap-2 px-4 py-2.5 border-b last:border-b-0 transition-colors",
                       member.isCurrentUser
                         ? "bg-indigo-500/[0.06]"
                         : "hover:bg-muted/30"
@@ -350,6 +373,9 @@ export function LeaderboardSection() {
                     {/* Feedback Rank */}
                     <RankCell rank={member.feedbackRank} />
 
+                    {/* Skill Rank */}
+                    <RankCell rank={member.skillRank} />
+
                     {/* Total Tokens */}
                     <div className="text-right">
                       <span className="text-sm font-medium tabular-nums">
@@ -357,6 +383,8 @@ export function LeaderboardSection() {
                       </span>
                       <div className="text-[10px] text-muted-foreground">
                         {member.totalFeedbacks} {t('settings.leaderboard.feedbacks', 'feedbacks')}
+                        {' · '}
+                        {t('settings.leaderboard.totalSkills', { count: member.totalSkillInvocations, defaultValue: '{{count}} skills' })}
                       </div>
                     </div>
                   </div>
@@ -369,6 +397,7 @@ export function LeaderboardSection() {
             {[
               { key: 'token', label: t('settings.leaderboard.tokenUsage', 'Token Usage'), icon: Flame, color: 'text-amber-500' },
               { key: 'feedback', label: t('settings.leaderboard.feedbackCount', 'Feedback Count'), icon: MessageSquareHeart, color: 'text-pink-500' },
+              { key: 'skill', label: t('settings.leaderboard.skillInvocations', 'Skill Invocations'), icon: Sparkles, color: 'text-violet-500' },
             ].map((col) => {
               const Icon = col.icon
               return (
@@ -379,10 +408,62 @@ export function LeaderboardSection() {
               )
             })}
           </div>
+
+          {/* Top skills this team */}
+          {topSkills.length > 0 && (
+            <div className="rounded-xl border bg-card overflow-hidden">
+              <div className="flex items-center gap-2 px-4 py-2.5 bg-muted/30 border-b">
+                <Sparkles className="h-3.5 w-3.5 text-violet-500" />
+                <span className="text-xs font-medium">
+                  {t('settings.leaderboard.topSkills', 'Top Skills This Team')}
+                </span>
+              </div>
+              {topSkills.map((skill, idx) => (
+                <div
+                  key={skill.name}
+                  className="grid grid-cols-[40px_1fr_100px_120px] items-center gap-2 px-4 py-2.5 border-b last:border-b-0"
+                >
+                  <span className="text-xs text-muted-foreground font-medium tabular-nums text-center">
+                    {idx + 1}
+                  </span>
+                  <span className="text-sm truncate">{skill.name}</span>
+                  <span className="text-xs text-right tabular-nums">
+                    {skill.count} {t('settings.leaderboard.calls', 'calls')}
+                  </span>
+                  <span className="text-xs text-right text-muted-foreground tabular-nums">
+                    {t('settings.leaderboard.usedBy', { n: skill.userCount, defaultValue: '{{n}} members' })}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
         </>
       )}
     </div>
   )
+}
+
+// ── Pure helpers ────────────────────────────────────────────────────────
+
+export function computeTopSkills(
+  leaderboard: TeamLeaderboard,
+  limit: number,
+): Array<{ name: string; count: number; userCount: number }> {
+  const totals = new Map<string, { count: number; users: Set<string> }>()
+  for (const member of leaderboard.members || []) {
+    for (const ws of Object.values(member.workspaces || {})) {
+      for (const [name, n] of Object.entries(ws.skillUsage || {})) {
+        const entry = totals.get(name) ?? { count: 0, users: new Set<string>() }
+        entry.count += n
+        entry.users.add(member.memberName)
+        totals.set(name, entry)
+      }
+    }
+  }
+  return [...totals.entries()]
+    .map(([name, { count, users }]) => ({ name, count, userCount: users.size }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
+    .slice(0, limit)
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────

@@ -1007,20 +1007,26 @@ impl OssSyncManager {
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
 
-                // Skip hidden files/dirs (but allow .gitignore)
-                if name_str.starts_with('.') && name_str != ".gitignore" {
-                    continue;
-                }
-
                 if path.is_dir() {
-                    // Check gitignore for directories
-                    if gitignore.matched(&path, true).is_ignore() {
+                    // Skip hidden dirs unless explicitly whitelisted in .gitignore
+                    // (.gitignore itself is a special file, not a dir, so no special case needed here)
+                    if name_str.starts_with('.') {
+                        if !gitignore.matched(&path, true).is_whitelist() {
+                            continue;
+                        }
+                    } else if gitignore.matched(&path, true).is_ignore() {
                         continue;
                     }
                     walk(base, &path, gitignore, result, skipped)?;
                 } else {
-                    // Check gitignore for files
-                    if gitignore.matched(&path, false).is_ignore() {
+                    let m = gitignore.matched(&path, false);
+                    // Hidden files: only include if explicitly whitelisted.
+                    // .gitignore is always included (special case).
+                    if name_str.starts_with('.') && name_str != ".gitignore" {
+                        if !m.is_whitelist() {
+                            continue;
+                        }
+                    } else if m.is_ignore() {
                         continue;
                     }
                     // Skip files exceeding the size limit
@@ -1108,18 +1114,25 @@ impl OssSyncManager {
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
 
-                // Skip hidden files/dirs (but allow .gitignore)
-                if name_str.starts_with('.') && name_str != ".gitignore" {
-                    continue;
-                }
-
                 if path.is_dir() {
-                    if gitignore.matched(&path, true).is_ignore() {
+                    // Skip hidden dirs unless explicitly whitelisted in .gitignore
+                    if name_str.starts_with('.') {
+                        if !gitignore.matched(&path, true).is_whitelist() {
+                            continue;
+                        }
+                    } else if gitignore.matched(&path, true).is_ignore() {
                         continue;
                     }
                     walk_incremental(base, &path, since, gitignore, result, skipped)?;
                 } else {
-                    if gitignore.matched(&path, false).is_ignore() {
+                    let m = gitignore.matched(&path, false);
+                    // Hidden files: only include if explicitly whitelisted.
+                    // .gitignore is always included (special case).
+                    if name_str.starts_with('.') && name_str != ".gitignore" {
+                        if !m.is_whitelist() {
+                            continue;
+                        }
+                    } else if m.is_ignore() {
                         continue;
                     }
                     // Skip files exceeding the size limit

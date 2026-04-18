@@ -26,7 +26,6 @@ import {
 } from "@/stores/streaming";
 import { insertMessageSorted } from "@/lib/insert-message-sorted";
 import type { MessagePart, Message } from "./session-types";
-
 type SessionSet = (fn: ((state: SessionState) => Partial<SessionState>) | Partial<SessionState>) => void;
 type SessionGet = () => SessionState;
 
