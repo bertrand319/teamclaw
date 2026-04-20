@@ -62,12 +62,38 @@ pub struct TeamStatus {
     pub llm: Option<LlmConfig>,
 }
 
-/// Result of a git operation
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One untracked file surfaced by the sync precheck.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncPrecheckFile {
+    pub path: String,
+    pub size_bytes: u64,
+}
+
+/// Result of a git operation.
+///
+/// `needs_confirmation` is set by `team_sync_repo` when untracked files exceed
+/// thresholds and the caller did not pass `force=true`. In that case `new_files`
+/// and `total_bytes` describe what would have been staged, and the sync did NOT run.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct TeamGitResult {
     pub success: bool,
     pub message: String,
+    #[serde(default)]
+    pub needs_confirmation: bool,
+    #[serde(default)]
+    pub new_files: Vec<SyncPrecheckFile>,
+    #[serde(default)]
+    pub total_bytes: u64,
 }
+
+// Thresholds for the pre-sync warning: if any is breached and the caller did
+// not pass `force=true`, `team_sync_repo` returns `needs_confirmation` instead
+// of committing.
+const SYNC_PRECHECK_MAX_FILE_COUNT: usize = 50;
+const SYNC_PRECHECK_MAX_SINGLE_FILE_BYTES: u64 = 10 * 1024 * 1024;
+const SYNC_PRECHECK_MAX_TOTAL_BYTES: u64 = 100 * 1024 * 1024;
 
 /// Team metadata stored in _meta/team.json (committed to Git)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,6 +158,21 @@ fn run_git(args: &[&str], cwd: &str) -> Result<(bool, String, String), String> {
         String::from_utf8_lossy(&output.stdout).to_string(),
         String::from_utf8_lossy(&output.stderr).to_string(),
     ))
+}
+
+/// Parse the NUL-delimited output of `git status --porcelain -z -uall`
+/// and return only the paths of untracked entries (records starting with `?? `).
+fn parse_untracked_paths(porcelain_bytes: &[u8]) -> Vec<String> {
+    porcelain_bytes
+        .split(|&b| b == 0)
+        .filter_map(|record| {
+            if record.len() > 3 && &record[..3] == b"?? " {
+                Some(String::from_utf8_lossy(&record[3..]).to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// Embed a Personal Access Token into an HTTPS git URL.
@@ -895,6 +936,7 @@ pub async fn team_init_repo(
             "Team repository cloned into {}/{}",
             workspace_path, TEAM_REPO_DIR
         ),
+        ..Default::default()
     })
 }
 
@@ -1326,6 +1368,7 @@ pub async fn team_git_join(
     Ok(TeamGitResult {
         success: true,
         message: format!("Joined team '{}' successfully", team_meta.team_name),
+        ..Default::default()
     })
 }
 
@@ -1341,14 +1384,60 @@ pub async fn team_generate_gitignore(
     Ok(TeamGitResult {
         success: true,
         message: ".gitignore ensured".to_string(),
+        ..Default::default()
     })
 }
 
-/// 1.5 - Sync team repo: fetch + reset --hard (in workspace/teamclaw-team)
+/// Scan untracked files in the team repo and return `(new_files, total_bytes)`
+/// if any pre-sync threshold is breached. Advisory — returns `None` on git
+/// errors so the sync flow is never blocked by precheck telemetry.
+fn detect_precheck_breach(team_dir: &str) -> Option<(Vec<SyncPrecheckFile>, u64)> {
+    let output = Command::new("git")
+        .args(["status", "--porcelain", "-z", "-uall"])
+        .current_dir(team_dir)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let paths = parse_untracked_paths(&output.stdout);
+    let mut new_files: Vec<SyncPrecheckFile> = Vec::with_capacity(paths.len());
+    let mut total_bytes: u64 = 0;
+    for rel_path in paths {
+        let abs = Path::new(team_dir).join(&rel_path);
+        let size_bytes = std::fs::metadata(&abs).map(|m| m.len()).unwrap_or(0);
+        total_bytes = total_bytes.saturating_add(size_bytes);
+        new_files.push(SyncPrecheckFile {
+            path: rel_path,
+            size_bytes,
+        });
+    }
+
+    let count_breach = new_files.len() > SYNC_PRECHECK_MAX_FILE_COUNT;
+    let single_breach = new_files
+        .iter()
+        .any(|f| f.size_bytes > SYNC_PRECHECK_MAX_SINGLE_FILE_BYTES);
+    let total_breach = total_bytes > SYNC_PRECHECK_MAX_TOTAL_BYTES;
+    if count_breach || single_breach || total_breach {
+        Some((new_files, total_bytes))
+    } else {
+        None
+    }
+}
+
+/// 1.5 - Sync team repo: fetch + reset --hard (in workspace/teamclaw-team).
+///
+/// Pass `force=Some(true)` to skip the pre-sync size/count check. When `force`
+/// is false/None and a threshold is breached, returns
+/// `TeamGitResult { success: false, needs_confirmation: true, new_files, total_bytes }`
+/// without touching the repo — the caller must confirm and re-invoke with force.
 #[tauri::command]
 pub async fn team_sync_repo(
     opencode_state: State<'_, OpenCodeState>,
     secrets_state: State<'_, crate::commands::shared_secrets::SharedSecretsState>,
+    force: Option<bool>,
 ) -> Result<TeamGitResult, String> {
     let workspace_path = get_workspace_path(&opencode_state)?;
     let team_dir = get_team_repo_path(&workspace_path);
@@ -1359,6 +1448,19 @@ pub async fn team_sync_repo(
             "Team directory '{}' is not a git repository. Please clone or initialize it first.",
             team_dir
         ));
+    }
+
+    // Pre-sync guard: block when untracked files breach thresholds, unless forced.
+    if !force.unwrap_or(false) {
+        if let Some((new_files, total_bytes)) = detect_precheck_breach(&team_dir) {
+            return Ok(TeamGitResult {
+                success: false,
+                message: String::new(),
+                needs_confirmation: true,
+                new_files,
+                total_bytes,
+            });
+        }
     }
 
     // Read saved config for token and branch
@@ -1528,6 +1630,7 @@ pub async fn team_sync_repo(
     Ok(TeamGitResult {
         success: true,
         message: sync_detail,
+        ..Default::default()
     })
 }
 
@@ -1543,6 +1646,7 @@ pub async fn team_disconnect_repo(
         return Ok(TeamGitResult {
             success: true,
             message: "Team folder not found, already disconnected".to_string(),
+            ..Default::default()
         });
     }
 
@@ -1552,6 +1656,7 @@ pub async fn team_disconnect_repo(
     Ok(TeamGitResult {
         success: true,
         message: "Team repository disconnected".to_string(),
+        ..Default::default()
     })
 }
 
@@ -1625,3 +1730,34 @@ pub async fn clear_team_config(opencode_state: State<'_, OpenCodeState>) -> Resu
 // NOTE: Startup team sync is triggered from the frontend after workspace is set,
 // since workspace_path is not available at Tauri setup time.
 // The frontend calls team_sync_repo on startup when team config is enabled.
+
+#[cfg(test)]
+mod sync_precheck_tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_untracked_paths_basic() {
+        let input = b"?? new.txt\x00 M modified.txt\x00?? subdir/other.bin\x00";
+        let paths = parse_untracked_paths(input);
+        assert_eq!(paths, vec!["new.txt".to_string(), "subdir/other.bin".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_untracked_paths_ignores_staged_modified_deleted() {
+        let input = b"A  staged.txt\x00MM both.txt\x00 D gone.txt\x00?? real.txt\x00";
+        let paths = parse_untracked_paths(input);
+        assert_eq!(paths, vec!["real.txt".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_untracked_paths_empty() {
+        assert!(parse_untracked_paths(b"").is_empty());
+    }
+
+    #[test]
+    fn test_parse_untracked_paths_handles_spaces_in_name() {
+        let input = b"?? my new file.txt\x00";
+        let paths = parse_untracked_paths(input);
+        assert_eq!(paths, vec!["my new file.txt".to_string()]);
+    }
+}
