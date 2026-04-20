@@ -334,6 +334,14 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       clipboardMode: null,
     });
 
+    // Update dock right-click menu title to show workspace name
+    if (isTauri()) {
+      const wsName = getFolderName(expandedPath);
+      import('@tauri-apps/api/core')
+        .then(m => m.invoke('set_window_title', { title: `TeamClaw — ${wsName}` }))
+        .catch(() => {});
+    }
+
     // Check if this is a new workspace (no .teamclaw directory yet)
     // Runs right after set() using pre-cached imports to minimize delay
     // before OpenCode server creates .teamclaw
@@ -392,11 +400,19 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       useTeamModeStore.getState().loadTeamConfig(expandedPath).catch(() => {});
     } catch { /* ignore */ }
 
-    // Persist workspace path for auto-restore on next launch
-    try {
-      localStorage.setItem(WORKSPACE_STORAGE_KEY, expandedPath);
-    } catch {
-      /* ignore storage errors */
+    // Persist workspace path for auto-restore on next launch.
+    // Secondary windows opened via create_workspace_window pass `?workspace=`
+    // in the URL — they must not overwrite the main window's saved value.
+    const isSecondaryWindow =
+      typeof window !== 'undefined' &&
+      typeof window.location?.search === 'string' &&
+      new URLSearchParams(window.location.search).has('workspace');
+    if (!isSecondaryWindow) {
+      try {
+        localStorage.setItem(WORKSPACE_STORAGE_KEY, expandedPath);
+      } catch {
+        /* ignore storage errors */
+      }
     }
 
     try {
