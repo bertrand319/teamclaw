@@ -242,6 +242,9 @@ jobs:
           version = os.environ['GITHUB_REF_NAME']
           target = os.environ['MATRIX_TARGET']
 
+          host = os.environ['OSS_ENDPOINT'].replace('https://', '').replace('http://', '')
+          oss_base = f'https://{os.environ["OSS_BUCKET"]}.{host}'
+
           files = glob.glob(f'src-tauri/target/{target}/release/bundle/dmg/*.dmg')
           if not files:
               print(f'No DMG found for target {target}, skipping')
@@ -251,8 +254,19 @@ jobs:
               key = f'releases/{version}/{os.path.basename(f)}'
               print(f'Uploading {os.path.basename(f)} → oss://{os.environ["OSS_BUCKET"]}/{key}')
               bucket.put_object_from_file(key, f)
-              host = os.environ['OSS_ENDPOINT'].replace('https://', '').replace('http://', '')
-              print(f'✅ https://{os.environ["OSS_BUCKET"]}.{host}/{key}')
+              print(f'✅ {oss_base}/{key}')
+
+          # Upload latest.txt and install-mac-cn.sh only once (aarch64 job)
+          if target != 'aarch64-apple-darwin':
+              sys.exit(0)
+
+          bucket.put_object('releases/latest.txt', version.encode())
+          print(f'✅ {oss_base}/releases/latest.txt → {version}')
+
+          with open('scripts/install-mac-cn.sh', 'r') as f:
+              script = f.read().replace('__OSS_BASE_URL__', oss_base)
+          bucket.put_object('install-mac-cn.sh', script.encode())
+          print(f'✅ {oss_base}/install-mac-cn.sh')
           EOF
 
   # Windows job uploads artifacts to the same GitHub Release created by macOS job
