@@ -1,8 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-# OSS_BASE is substituted by CI during release; do not edit manually
-OSS_BASE="__OSS_BASE_URL__"
+OSS_BASE="https://teamclaw.ucar.cc"
 APP_NAME="TeamClaw"
 MOUNT_POINT="/Volumes/${APP_NAME}"
 

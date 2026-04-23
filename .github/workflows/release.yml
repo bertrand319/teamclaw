@@ -280,7 +280,7 @@ jobs:
           print(f'✅ {oss_base}/releases/latest.txt -> {version}')
 
           with open('scripts/install-mac-cn.sh', 'r') as f:
-              script = f.read().replace('__OSS_BASE_URL__', oss_base)
+              script = f.read()
           bucket.put_object('install-mac-cn.sh', script.encode())
           print(f'✅ {oss_base}/install-mac-cn.sh')
           EOF
@@ -539,15 +539,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OSS_BUCKET: ${{ secrets.OSS_BUCKET }}
-          OSS_ENDPOINT: ${{ secrets.OSS_ENDPOINT }}
         run: |
           if [ -z "$OSS_BUCKET" ]; then
             echo "OSS not configured, skipping release notes update"
             exit 0
           fi
-          HOST="${OSS_ENDPOINT#https://}"
-          HOST="${HOST#http://}"
-          OSS_BASE="https://${OSS_BUCKET}.${HOST}"
+          CN_BASE="https://teamclaw.ucar.cc"
           VERSION="${{ github.ref_name }}"
           VERSION_NUM="${VERSION#v}"
 
@@ -557,19 +554,19 @@ jobs:
 
           ---
 
-          ### 国内加速下载（阿里云 OSS）
+          ### 国内加速下载
 
           #### macOS（一键安装）
           \`\`\`bash
-          curl -fsSL ${OSS_BASE}/install-mac-cn.sh | bash
+          curl -fsSL ${CN_BASE}/install-mac-cn.sh | bash
           \`\`\`
 
           #### macOS（手动下载）
-          - Apple Silicon：[TeamClaw_${VERSION_NUM}_aarch64.dmg](${OSS_BASE}/releases/${VERSION}/TeamClaw_${VERSION_NUM}_aarch64.dmg)
-          - Intel：[TeamClaw_${VERSION_NUM}_x64.dmg](${OSS_BASE}/releases/${VERSION}/TeamClaw_${VERSION_NUM}_x64.dmg)
+          - Apple Silicon：[TeamClaw_${VERSION_NUM}_aarch64.dmg](${CN_BASE}/releases/${VERSION}/TeamClaw_${VERSION_NUM}_aarch64.dmg)
+          - Intel：[TeamClaw_${VERSION_NUM}_x64.dmg](${CN_BASE}/releases/${VERSION}/TeamClaw_${VERSION_NUM}_x64.dmg)
 
           #### Windows
-          - [TeamClaw_${VERSION_NUM}_x64-setup.exe](${OSS_BASE}/releases/${VERSION}/TeamClaw_${VERSION_NUM}_x64-setup.exe)"
+          - [TeamClaw_${VERSION_NUM}_x64-setup.exe](${CN_BASE}/releases/${VERSION}/TeamClaw_${VERSION_NUM}_x64-setup.exe)"
 
           gh release edit "$VERSION" --repo ${{ github.repository }} --notes "${CURRENT}${CN_SECTION}"
           echo "✅ Release notes updated with CN mirror links"
