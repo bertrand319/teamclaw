@@ -86,7 +86,9 @@ export function FileBrowser({ className, variant = 'default', rootPath, rootPath
     return findSubtree(fileTree, rootPath) ?? []
   }, [rootPaths, rootLabels, rootPath, fileTree])
 
-  // Ensure rootPath(s) and their ancestors are loaded into the global tree on mount
+  // Ensure custom rootPath(s) are present in the global tree before we try to
+  // render them as virtual roots. In practice the initial attempt can race the
+  // first root refresh, especially for deep team paths like teamclaw-team/knowledge.
   React.useEffect(() => {
     const expandWithAncestors = async (targetPath: string) => {
       const wp = useWorkspaceStore.getState().workspacePath
@@ -99,14 +101,19 @@ export function FileBrowser({ className, variant = 'default', rootPath, rootPath
         await useWorkspaceStore.getState().expandDirectory(current)
       }
     }
+
+    const needsLoad = (targetPath: string) => findSubtree(fileTree, targetPath) === undefined
+
     if (rootPaths && rootPaths.length > 0) {
       for (const p of rootPaths) {
-        expandWithAncestors(p)
+        if (needsLoad(p)) {
+          expandWithAncestors(p)
+        }
       }
-    } else if (rootPath) {
+    } else if (rootPath && needsLoad(rootPath)) {
       expandWithAncestors(rootPath)
     }
-  }, [rootPaths, rootPath])
+  }, [rootPaths, rootPath, fileTree])
 
   // Auto-refresh file tree when panel opens (default variant) or when mounted (panel variant)
   React.useEffect(() => {
