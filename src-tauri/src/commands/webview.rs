@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
-use tauri::Manager;
+use tauri::{Manager, Runtime};
 
 /// Safari user agent matching the actual WKWebView engine.
 /// Chrome UA causes blank pages — servers may return Chrome-specific responses
@@ -42,6 +42,114 @@ impl Default for WebviewManager {
         }
     }
 }
+
+fn build_teamclaw_identity_script(
+    device_no: &str,
+    device_name: &str,
+    device_token: Option<String>,
+) -> String {
+    let escaped_no = serde_json::to_string(device_no).unwrap_or_else(|_| "\"\"".to_string());
+    let escaped_name = serde_json::to_string(device_name).unwrap_or_else(|_| "\"\"".to_string());
+    let escaped_token = match device_token {
+        Some(token) => serde_json::to_string(&token).unwrap_or_else(|_| "null".to_string()),
+        None => "null".to_string(),
+    };
+
+    format!(
+        r#"(function(){{
+  var __next = {{ deviceNo: {no}, deviceName: {name}, deviceToken: {token} }};
+  if (typeof window.__TEAMCLAW_SET_IDENTITY__ !== 'function') {{
+    var __state = {{ deviceNo: '', deviceName: '', deviceToken: null }};
+    Object.defineProperty(window, '__TEAMCLAW_SET_IDENTITY__', {{
+      value: function(next) {{
+        __state.deviceNo = next && next.deviceNo ? next.deviceNo : '';
+        __state.deviceName = next && next.deviceName ? next.deviceName : '';
+        __state.deviceToken = next ? next.deviceToken : null;
+      }},
+      writable: false,
+      enumerable: false,
+      configurable: true
+    }});
+    Object.defineProperty(window, 'teamclaw', {{
+      value: Object.freeze({{
+        get deviceNo() {{ return __state.deviceNo; }},
+        get deviceName() {{ return __state.deviceName; }},
+        get deviceToken() {{ return __state.deviceToken; }}
+      }}),
+      writable: false,
+      enumerable: true,
+      configurable: true
+    }});
+  }}
+  window.__TEAMCLAW_SET_IDENTITY__(__next);
+}})();"#,
+        no = escaped_no,
+        name = escaped_name,
+        token = escaped_token,
+    )
+}
+
+fn build_teamclaw_identity_script_with_fresh_token(device_no: &str, device_name: &str) -> String {
+    let device_token = match super::device_token::generate(device_no, "") {
+        Ok(token) => Some(token),
+        Err(e) => {
+            eprintln!("[Webview] device_token generation skipped: {}", e);
+            None
+        }
+    };
+    build_teamclaw_identity_script(device_no, device_name, device_token)
+}
+
+#[cfg(target_os = "macos")]
+fn add_document_start_script<R: Runtime>(webview: &tauri::Webview<R>, script: &str) {
+    let script = script.to_string();
+    if let Err(e) = webview.with_webview(move |wv| {
+        use objc2::runtime::AnyObject;
+        use objc2::{class, msg_send};
+        use std::ffi::CString;
+
+        let Ok(script) = CString::new(script) else {
+            return;
+        };
+
+        unsafe {
+            let wk_webview: *const AnyObject = wv.inner().cast();
+            let config: *const AnyObject = msg_send![wk_webview, configuration];
+            if config.is_null() {
+                return;
+            }
+            let controller: *const AnyObject = msg_send![config, userContentController];
+            if controller.is_null() {
+                return;
+            }
+            let source: *const AnyObject =
+                msg_send![class!(NSString), stringWithUTF8String: script.as_ptr()];
+            if source.is_null() {
+                return;
+            }
+            let allocated: *mut AnyObject = msg_send![class!(WKUserScript), alloc];
+            if allocated.is_null() {
+                return;
+            }
+            let user_script: *mut AnyObject = msg_send![
+                allocated,
+                initWithSource: source,
+                injectionTime: 0isize,
+                forMainFrameOnly: true
+            ];
+            if user_script.is_null() {
+                return;
+            }
+            let _: () = msg_send![controller, addUserScript: user_script];
+            objc2::ffi::objc_release(user_script as *mut _);
+        }
+    }) {
+        eprintln!("[Webview] Failed to refresh document-start identity script: {e}");
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn add_document_start_script<R: Runtime>(_webview: &tauri::Webview<R>, _script: &str) {}
 
 /// Create a shared WKWebViewConfiguration on the main thread.
 /// Must be called from Tauri's builder chain or setup() which run on the main thread.
@@ -245,10 +353,18 @@ pub async fn webview_create(
         }
     }
 
-    // Intercept target="_blank" links and window.open() so they navigate
-    // within the same webview instead of opening the system browser.
-    webview_builder = webview_builder.initialization_script(
+    // Intercept target="_blank" links and window.open() so OAuth popups
+    // remain in the same native webview. Run in all frames because OAuth
+    // widgets often live inside iframes.
+    webview_builder = webview_builder.initialization_script_for_all_frames(
         r#"(function(){
+  function navigateHere(href) {
+    try {
+      window.top.location.href = href;
+    } catch (_) {
+      window.location.href = href;
+    }
+  }
   document.addEventListener('click', function(e) {
     var a = e.target.closest && e.target.closest('a');
     if (!a) return;
@@ -258,25 +374,58 @@ pub async fn webview_create(
       if (href && /^https?:\/\//.test(href)) {
         e.preventDefault();
         e.stopPropagation();
-        window.location.href = href;
+        navigateHere(href);
       }
     }
   }, true);
   var _open = window.open;
-  window.open = function(url) {
+  var _interceptOpen = function(url) {
     if (url && /^https?:\/\//.test(String(url))) {
-      window.location.href = String(url);
+      navigateHere(String(url));
       return window;
     }
     return _open.apply(this, arguments);
   };
+  try {
+    Object.defineProperty(window, 'open', {
+      value: _interceptOpen, writable: true, configurable: true
+    });
+  } catch (_) {}
 })();"#,
     );
+
+    // Native fallback for popup requests that bypass our JS hook.
+    {
+        let popup_label = label.clone();
+        let popup_app = app.clone();
+        webview_builder = webview_builder.on_new_window(move |url, _features| {
+            if matches!(url.scheme(), "http" | "https") {
+                eprintln!(
+                    "[Webview] Redirecting popup request for '{}' to {}",
+                    popup_label, url
+                );
+                if let Some(webview) = popup_app.get_webview(&popup_label) {
+                    let _ = webview.navigate(url.clone());
+                }
+            }
+            tauri::webview::NewWindowResponse::Deny
+        });
+    }
+
+    let identity = if let (Some(dno), Some(dname)) = (&device_no, &device_name) {
+        Some((dno.clone(), dname.clone()))
+    } else {
+        None
+    };
+    let initial_identity_script = identity
+        .as_ref()
+        .map(|(dno, dname)| build_teamclaw_identity_script_with_fresh_token(dno, dname));
 
     // Page load progress via on_page_load callback (no JS injection needed —
     // child webviews don't have __TAURI_INTERNALS__)
     {
         let progress_label = label.clone();
+        let identity = identity.clone();
         webview_builder = webview_builder.on_page_load(move |webview, payload| {
             use tauri::Emitter;
             let progress = match payload.event() {
@@ -290,31 +439,28 @@ pub async fn webview_create(
                     "progress": progress
                 }),
             );
+
+            if let Some((device_no, device_name)) = &identity {
+                let script =
+                    build_teamclaw_identity_script_with_fresh_token(device_no, device_name);
+                match payload.event() {
+                    tauri::webview::PageLoadEvent::Started => {
+                        add_document_start_script(&webview, &script);
+                    }
+                    tauri::webview::PageLoadEvent::Finished => {
+                        let _ = webview.eval(&script);
+                    }
+                }
+            }
         });
     }
 
     // Right-click: rely on the native WKWebView / WebView2 context menu.
     // No custom init script needed — native menus provide Copy/Paste/Look Up/etc.
 
-    // Inject window.teamclaw identity global before any page scripts run.
-    // deviceNo and deviceName are always injected when available.
-    // deviceToken is optional — omitted (null) when DEVICE_JWT_SECRET is not configured.
-    if let (Some(ref dno), Some(ref dname)) = (&device_no, &device_name) {
-        let escaped_no = serde_json::to_string(dno).unwrap_or_else(|_| "\"\"".to_string());
-        let escaped_name = serde_json::to_string(dname).unwrap_or_else(|_| "\"\"".to_string());
-        let escaped_token = match super::device_token::generate(dno, "") {
-            Ok(token) => serde_json::to_string(&token).unwrap_or_else(|_| "null".to_string()),
-            Err(e) => {
-                eprintln!("[Webview] device_token generation skipped: {}", e);
-                "null".to_string()
-            }
-        };
-        let script = format!(
-            "Object.defineProperty(window, 'teamclaw', {{ value: Object.freeze({{ deviceNo: {no}, deviceName: {name}, deviceToken: {token} }}), writable: false, configurable: false }});",
-            no = escaped_no,
-            name = escaped_name,
-            token = escaped_token,
-        );
+    // Inject window.teamclaw before page scripts run. The object is stable but
+    // its getters read refreshed values after OAuth redirects and page reloads.
+    if let Some(script) = initial_identity_script {
         webview_builder = webview_builder.initialization_script(&script);
     }
 
@@ -600,3 +746,30 @@ pub async fn webview_set_zoom(
 
 // Context menu: using native WKWebView / WebView2 built-in context menu.
 // No custom Rust handler needed — the native menu provides Copy/Paste/Look Up/etc.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn teamclaw_identity_script_is_refreshable() {
+        let script =
+            build_teamclaw_identity_script("device-1", "Alice", Some("token-1".to_string()));
+
+        assert!(script.contains("__TEAMCLAW_SET_IDENTITY__"));
+        assert!(script.contains("get deviceToken()"));
+        assert!(script.contains("configurable: true"));
+        assert!(script.contains("\"device-1\""));
+        assert!(script.contains("\"Alice\""));
+        assert!(script.contains("\"token-1\""));
+    }
+
+    #[test]
+    fn teamclaw_identity_script_escapes_values_and_allows_missing_token() {
+        let script = build_teamclaw_identity_script("device\"quoted", "name\nline", None);
+
+        assert!(script.contains("device\\\"quoted"));
+        assert!(script.contains("name\\nline"));
+        assert!(script.contains("deviceToken: null"));
+    }
+}
