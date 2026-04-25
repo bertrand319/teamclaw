@@ -511,8 +511,7 @@ jobs:
               endpoint = 'https://' + endpoint
           bucket = oss2.Bucket(auth, endpoint, os.environ['OSS_BUCKET'])
           version = os.environ['VERSION']
-          host = os.environ['OSS_ENDPOINT'].replace('https://', '').replace('http://', '').rstrip('/')
-          oss_base = f'https://{os.environ["OSS_BUCKET"]}.{host}'
+          cdn_base = 'https://teamclaw.ucar.cc'
           manifest_path = '/tmp/oss-latest/latest.json'
 
           with open(manifest_path, 'r', encoding='utf-8') as f:
@@ -524,7 +523,7 @@ jobs:
                   continue
               filename = url.rstrip('/').split('/')[-1]
               if filename:
-                  entry['url'] = f'{oss_base}/releases/{version}/{filename}'
+                  entry['url'] = f'{cdn_base}/releases/{version}/{filename}'
 
           mirrored_manifest_path = '/tmp/oss-latest/latest.oss.json'
           with open(mirrored_manifest_path, 'w', encoding='utf-8') as f:
