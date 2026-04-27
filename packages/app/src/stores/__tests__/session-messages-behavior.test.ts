@@ -181,6 +181,16 @@ describe('session store: message behavior', () => {
       expect(callArgs[4]).toContain('chrome-control MCP');
     });
 
+    it('adds workspace python venv system prompt when workspace is loaded', async () => {
+      await useSessionStore.getState().sendMessage('帮我运行这个 python 脚本');
+
+      expect(mockSendMessageAsync).toHaveBeenCalledTimes(1);
+      const callArgs = mockSendMessageAsync.mock.calls[0];
+      expect(callArgs[4]).toContain('Workspace Python execution rule:');
+      expect(callArgs[4]).toContain('create `<workspace>/.venv` first');
+      expect(callArgs[4]).toContain('Use the Python interpreter and pip from that virtual environment');
+    });
+
     it('queues message when already streaming', async () => {
       // First send a message to start streaming
       await useSessionStore.getState().sendMessage('first message');

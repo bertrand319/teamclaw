@@ -20,6 +20,7 @@ import {
   useStreamingStore,
   cleanupAllChildSessions,
 } from "@/stores/streaming";
+import { useWorkspaceStore } from "@/stores/workspace";
 import { trackEvent } from "@/stores/telemetry";
 import { syncSetSessionId } from "@/lib/opencode/sdk-sse";
 import { insertMessageSorted } from "@/lib/insert-message-sorted";
@@ -41,6 +42,13 @@ const TERMINAL_NON_INTERACTIVE_PROMPT = [
   "If a command may wait for confirmation, passwords, editor input, or stdin, do not run it in interactive mode.",
   "First look for safe non-interactive flags or env such as `--yes`, `-y`, `--force`, `CI=1`, `DEBIAN_FRONTEND=noninteractive`, `GIT_PAGER=cat`, or `PAGER=cat` when appropriate.",
   "If the task truly requires user confirmation and there is no safe non-interactive form, ask the user first instead of starting a command that waits on terminal input.",
+].join(" ");
+
+const WORKSPACE_PYTHON_VENV_PROMPT = [
+  "Workspace Python execution rule:",
+  "When a workspace is loaded and the task needs to run Python scripts, use a virtual environment at the workspace root.",
+  "If `<workspace>/.venv` does not exist, create `<workspace>/.venv` first.",
+  "Use the Python interpreter and pip from that virtual environment for Python script execution and package installs instead of the system Python.",
 ].join(" ");
 
 const LOGIN_RELATED_PATTERNS = [
@@ -307,6 +315,13 @@ export function createMessageActions(set: SessionSet, get: SessionGet) {
 
         if (shouldPreferInteractiveBrowserForMessage(content)) {
           systemPrompt = appendSystemPrompt(systemPrompt, LOGIN_RELATED_PROMPT);
+        }
+
+        if (useWorkspaceStore.getState().workspacePath) {
+          systemPrompt = appendSystemPrompt(
+            systemPrompt,
+            WORKSPACE_PYTHON_VENV_PROMPT,
+          );
         }
 
         systemPrompt = appendSystemPrompt(
