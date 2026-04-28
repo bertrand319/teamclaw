@@ -142,22 +142,33 @@ export const useUIStore = create<UIState>((set, get) => ({
   closeEmbeddedSettingsSection: () => set({ embeddedSettingsSection: null }),
 
   startNewChat: () => {
+    // Switch to chat view synchronously so settings (full-page or embedded)
+    // hides immediately — waiting on the dynamic imports below would leave
+    // the settings UI visible until the import chain resolves.
+    set({
+      currentView: 'chat',
+      settingsInitialSection: null,
+      embeddedSettingsSection: null,
+    })
+    const isStacked = get().mainContentLayout === 'stacked'
+
     // Import session and other stores lazily to avoid circular dependencies
     import('@/stores/session').then(({ useSessionStore }) => {
       import('@/stores/workspace').then(({ useWorkspaceStore }) => {
         import('@/stores/tabs').then(({ useTabsStore }) => {
           import('@/stores/streaming').then(({ useStreamingStore }) => {
-            // Close any open UI elements and return to chat view
-            set({ 
-              currentView: 'chat', 
-              settingsInitialSection: null, 
-              embeddedSettingsSection: null 
-            })
             useWorkspaceStore.getState().clearSelection()
             useWorkspaceStore.getState().closePanel()
-            useTabsStore.getState().hideAll()
+            // Only deactivate the editor multi-tab pane in stacked layout —
+            // in stacked mode chat and tabs share the same slot, so we need
+            // to hide tabs to reveal the chat view. In split layout the
+            // chat pane is already visible alongside the tabs, so closing
+            // them just makes the user's open files vanish for no reason.
+            if (isStacked) {
+              useTabsStore.getState().hideAll()
+            }
             useStreamingStore.getState().clearStreaming()
-            
+
             // Clear session state to show "Start a New Chat" UI
             // Actual session will be created when user sends first message
             useSessionStore.setState({
