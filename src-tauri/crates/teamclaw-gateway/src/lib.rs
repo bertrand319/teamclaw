@@ -862,7 +862,7 @@ pub async fn opencode_list_sessions(port: u16) -> Result<Vec<SessionInfo>, Strin
         None => return Err("Unexpected session list format".to_string()),
     };
 
-    sessions.sort_by(|a, b| b.updated.cmp(&a.updated));
+    sessions.sort_by_key(|session| std::cmp::Reverse(session.updated));
     sessions.truncate(MAX_SESSIONS_LIST);
 
     Ok(sessions)

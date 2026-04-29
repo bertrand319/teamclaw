@@ -467,7 +467,7 @@ pub async fn rag_list_memories(workspace_path: String) -> Result<Vec<MemoryRecor
         }
     }
 
-    memories.sort_by(|a, b| b.updated.cmp(&a.updated));
+    memories.sort_by_key(|memory| std::cmp::Reverse(memory.updated.clone()));
     Ok(memories)
 }
 
