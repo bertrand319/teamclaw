@@ -3460,7 +3460,7 @@ pub async fn query_skills_leaderboard(node: &IrohNode) -> Result<Vec<SkillsContr
         }
     }
 
-    results.sort_by(|a, b| b.edit_count.cmp(&a.edit_count));
+    results.sort_by_key(|result| std::cmp::Reverse(result.edit_count));
     Ok(results)
 }
 
