@@ -56,13 +56,43 @@ export function QuestionInputDock({
 
   const currentQuestion = questions[questionIndex];
   const currentQuestionId = currentQuestion?.id || String(questionIndex);
-  const selectedAnswer = answers[currentQuestionId] || "";
+  const hasSelectedAnswer = Object.prototype.hasOwnProperty.call(answers, currentQuestionId);
+  const selectedAnswer = hasSelectedAnswer ? answers[currentQuestionId] : "";
   const customAnswer = customInputs[currentQuestionId] || "";
-  const currentAnswer = customAnswer.trim() || selectedAnswer;
+  const trimmedCustomAnswer = customAnswer.trim();
   const isLastQuestion = questionIndex >= questions.length - 1;
-  const canContinue = !!currentAnswer && !!pendingQuestion.questionId && !isSubmitting && !hasSubmitted;
+  const canContinue =
+    (!!trimmedCustomAnswer || hasSelectedAnswer) &&
+    !!pendingQuestion.questionId &&
+    !isSubmitting &&
+    !hasSubmitted;
   const canSkip = !!pendingQuestion.questionId && !isSubmitting && !hasSubmitted;
   const questionTitle = currentQuestion?.header || t("chat.toolCall.question.title", "Question");
+
+  const getOptionValue = (option: { label: string; value?: string }) => option.value ?? option.label;
+
+  const getQuestionId = (question: { id?: string }, index: number) => question.id || String(index);
+
+  const hasAnswerForQuestion = (question: { id?: string }, index: number) => {
+    const questionId = getQuestionId(question, index);
+    return !!customInputs[questionId]?.trim() || Object.prototype.hasOwnProperty.call(answers, questionId);
+  };
+
+  const buildFinalAnswers = () => {
+    const finalAnswers: Record<string, string> = {};
+    questions.forEach((question, index) => {
+      const questionId = getQuestionId(question, index);
+      const custom = customInputs[questionId]?.trim();
+      finalAnswers[questionId] = custom || (answers[questionId] ?? "");
+    });
+    return finalAnswers;
+  };
+
+  const shouldSubmitEmptyAnswerOnSkip =
+    isLastQuestion &&
+    questions.length > 1 &&
+    questions.slice(0, -1).every(hasAnswerForQuestion) &&
+    !!currentQuestion?.options?.some((option) => getOptionValue(option) === "");
 
   const handleOptionSelect = (value: string) => {
     setAnswers((prev) => ({ ...prev, [currentQuestionId]: value }));
@@ -85,13 +115,7 @@ export function QuestionInputDock({
 
     setIsSubmitting(true);
     try {
-      const finalAnswers: Record<string, string> = {};
-      questions.forEach((question, index) => {
-        const questionId = question.id || String(index);
-        const custom = customInputs[questionId]?.trim();
-        finalAnswers[questionId] = custom || answers[questionId] || "";
-      });
-      await answerQuestion(finalAnswers, pendingQuestion.questionId);
+      await answerQuestion(buildFinalAnswers(), pendingQuestion.questionId);
       setHasSubmitted(true);
     } finally {
       setIsSubmitting(false);
@@ -102,7 +126,13 @@ export function QuestionInputDock({
     if (!canSkip) return;
     setIsSubmitting(true);
     try {
-      await skipQuestion(pendingQuestion.questionId);
+      if (shouldSubmitEmptyAnswerOnSkip) {
+        const finalAnswers = buildFinalAnswers();
+        finalAnswers[currentQuestionId] = "";
+        await answerQuestion(finalAnswers, pendingQuestion.questionId);
+      } else {
+        await skipQuestion(pendingQuestion.questionId);
+      }
       setHasSubmitted(true);
     } finally {
       setIsSubmitting(false);
@@ -180,8 +210,8 @@ export function QuestionInputDock({
 
             <div className="space-y-1">
               {currentQuestion.options?.map((option, optionIndex) => {
-                const optionValue = option.value || option.label;
-                const isSelected = selectedAnswer === optionValue && !customAnswer.trim();
+                const optionValue = getOptionValue(option);
+                const isSelected = hasSelectedAnswer && selectedAnswer === optionValue && !customAnswer.trim();
                 return (
                   <button
                     key={`${optionValue}-${optionIndex}`}
