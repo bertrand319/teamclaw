@@ -102,6 +102,8 @@ export const LLMSection = React.memo(function LLMSection() {
   const [oauthPending, setOAuthPending] = React.useState(false)
   const [oauthInstructions, setOAuthInstructions] = React.useState('')
   const [oauthUrl, setOAuthUrl] = React.useState('')
+  const [oauthMethodType, setOAuthMethodType] = React.useState<'auto' | 'code' | null>(null)
+  const [oauthCodeInput, setOAuthCodeInput] = React.useState('')
   const [oauthCodeCopied, setOAuthCodeCopied] = React.useState(false)
 
   // Disconnect confirmation state
@@ -176,6 +178,8 @@ export const LLMSection = React.memo(function LLMSection() {
     setOAuthPending(false)
     setOAuthInstructions('')
     setOAuthUrl('')
+    setOAuthMethodType(null)
+    setOAuthCodeInput('')
     setConnectDialogOpen(true)
   }
 
@@ -205,16 +209,42 @@ export const LLMSection = React.memo(function LLMSection() {
     await open(result.url)
     setOAuthUrl(result.url)
     setOAuthInstructions(result.instructions)
+    setOAuthMethodType(result.methodType)
+    setOAuthCodeInput('')
     setOAuthPending(true)
     setIsConnecting(false)
-    // For Device Flow ("auto"), sidecar polls internally — kick off callback in background
-    completeOAuthCallback(connectingProviderId, methodIndex).then((success) => {
+    if (result.methodType === 'auto') {
+      // For Device Flow ("auto"), sidecar polls internally — kick off callback in background
+      completeOAuthCallback(connectingProviderId, methodIndex).then((success) => {
+        if (success) {
+          setConnectDialogOpen(false)
+          setOAuthPending(false)
+          setOAuthMethodType(null)
+          setOAuthCodeInput('')
+          restartOpenCodeAndRefresh()
+        }
+      })
+    }
+  }
+
+  const handleOAuthCodeSubmit = async () => {
+    const code = oauthCodeInput.trim()
+    if (!code) return
+    const methodIndex = getProviderOAuthMethodIndex(connectingProviderId)
+    if (methodIndex === -1) return
+    setIsConnecting(true)
+    try {
+      const success = await completeOAuthCallback(connectingProviderId, methodIndex, code)
       if (success) {
         setConnectDialogOpen(false)
         setOAuthPending(false)
-        restartOpenCodeAndRefresh()
+        setOAuthMethodType(null)
+        setOAuthCodeInput('')
+        await restartOpenCodeAndRefresh()
       }
-    })
+    } finally {
+      setIsConnecting(false)
+    }
   }
 
   const handleCopyOAuthCode = async () => {
@@ -660,7 +690,13 @@ export const LLMSection = React.memo(function LLMSection() {
 
       {/* Connect Provider Dialog */}
       <Dialog open={connectDialogOpen} onOpenChange={(open) => {
-        if (!open) { setOAuthPending(false); setOAuthInstructions(''); setOAuthUrl('') }
+        if (!open) {
+          setOAuthPending(false)
+          setOAuthInstructions('')
+          setOAuthUrl('')
+          setOAuthMethodType(null)
+          setOAuthCodeInput('')
+        }
         setConnectDialogOpen(open)
       }}>
         <DialogContent className="sm:max-w-md">
@@ -687,10 +723,27 @@ export const LLMSection = React.memo(function LLMSection() {
                   </Button>
                 )}
               </div>
-              <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
-                {t('settings.llm.oauthPolling', 'Waiting for authorization...')}
-              </div>
+              {oauthMethodType === 'code' ? (
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">{t('settings.llm.authorizationCode', 'Authorization code')}</label>
+                  <Input
+                    value={oauthCodeInput}
+                    onChange={(e) => setOAuthCodeInput(e.target.value)}
+                    placeholder={t('settings.llm.authorizationCodePlaceholder', 'Paste authorization code')}
+                    className="h-10"
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && oauthCodeInput.trim()) {
+                        handleOAuthCodeSubmit()
+                      }
+                    }}
+                  />
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
+                  {t('settings.llm.oauthPolling', 'Waiting for authorization...')}
+                </div>
+              )}
               <Button variant="outline" size="sm" className="gap-2 w-full" onClick={async () => {
                 const { open } = await import('@tauri-apps/plugin-shell')
                 open(oauthUrl)
@@ -759,11 +812,35 @@ export const LLMSection = React.memo(function LLMSection() {
           <DialogFooter>
             <Button
               variant="outline"
-              onClick={() => { setOAuthPending(false); setConnectDialogOpen(false) }}
+              onClick={() => {
+                setOAuthPending(false)
+                setOAuthMethodType(null)
+                setOAuthCodeInput('')
+                setConnectDialogOpen(false)
+              }}
               disabled={isConnecting}
             >
               {t('common.cancel', 'Cancel')}
             </Button>
+            {oauthPending && oauthMethodType === 'code' && (
+              <Button
+                onClick={handleOAuthCodeSubmit}
+                disabled={isConnecting || !oauthCodeInput.trim()}
+                className="gap-2"
+              >
+                {isConnecting ? (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    {t('settings.llm.connecting', 'Connecting...')}
+                  </>
+                ) : (
+                  <>
+                    <Link className="h-4 w-4" />
+                    {t('settings.llm.completeAuthorization', 'Complete authorization')}
+                  </>
+                )}
+              </Button>
+            )}
             {!oauthPending && (
               <Button
                 onClick={handleConnectSubmit}
