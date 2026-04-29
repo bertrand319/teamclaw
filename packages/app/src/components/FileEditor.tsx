@@ -384,7 +384,7 @@ export function FileEditor({
   const previousContentRef = useRef(content);
 
   // --- Markdown auto-save & conflict state ---
-  const isMarkdown = getEditorType(filename) === "markdown";
+  const isMarkdown = supportsPreview(filename) === "markdown";
   const tiptapEditorRef = useRef<import("@/components/editors/TiptapMarkdownEditor").TiptapEditorHandle>(null);
 
   // Conflict state for markdown files
@@ -945,7 +945,7 @@ export function FileEditor({
         ) : (
           (() => {
             // Route to appropriate editor based on file type
-            const editorType = getEditorType(filename, filePath);
+            const editorType = getEditorType(filename, filePath, content);
 
             if (editorType === "markdown") {
               return (

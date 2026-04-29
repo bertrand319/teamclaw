@@ -5,16 +5,27 @@
 
 export type EditorType = 'markdown' | 'code';
 
+export const MAX_MARKDOWN_WYSIWYG_CHARS = 512 * 1024;
+
+function isMarkdownExtension(filename: string): boolean {
+  const ext = filename.split('.').pop()?.toLowerCase();
+  return ext === 'md' || ext === 'markdown';
+}
+
 /**
  * Determine which editor type to use for a given filename.
  * HTML files are routed to the code editor (with optional preview via supportsPreview).
  * Skill files (SKILL.md inside skills directories) use code editor for raw editing.
+ * Very large Markdown files use CodeMirror because parsing the whole document
+ * into a Tiptap/ProseMirror tree can freeze the renderer thread.
  */
-export function getEditorType(filename: string, filePath?: string): EditorType {
+export function getEditorType(filename: string, filePath?: string, content?: string): EditorType {
   // Skill markdown files should use CodeMirror for raw frontmatter editing
   if (filePath && isSkillFile(filePath)) return 'code';
-  const ext = filename.split('.').pop()?.toLowerCase();
-  if (ext === 'md' || ext === 'markdown') return 'markdown';
+  if (isMarkdownExtension(filename)) {
+    if (content && content.length > MAX_MARKDOWN_WYSIWYG_CHARS) return 'code';
+    return 'markdown';
+  }
   return 'code';
 }
 

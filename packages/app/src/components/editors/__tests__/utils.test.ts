@@ -73,6 +73,18 @@ describe('getEditorType', () => {
   it('returns "markdown" when no filePath is provided for .md', () => {
     expect(getEditorType('SKILL.md')).toBe('markdown');
   });
+
+  it('routes large markdown files to the code editor to avoid WYSIWYG parse freezes', () => {
+    const largeMarkdown = '# Issue Review\n\n' + 'A'.repeat(512 * 1024 + 1);
+
+    expect(getEditorType('SPAYS-17321.md', '/workspace/knowledge/SPAYS-17321.md', largeMarkdown)).toBe('code');
+  });
+
+  it('keeps smaller markdown files in the WYSIWYG editor', () => {
+    const markdown = '# Notes\n\nSmall enough for rich editing.';
+
+    expect(getEditorType('README.md', '/workspace/README.md', markdown)).toBe('markdown');
+  });
 });
 
 describe('isSkillFile', () => {
