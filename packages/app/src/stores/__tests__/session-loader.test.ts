@@ -74,6 +74,7 @@ describe('session-loader: createLoaderActions', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    vi.mocked(localStorage.getItem).mockReturnValue(null)
     sessionLookupCache.clear()
     sessionDataCache.clear()
     selfCreatedSessionIds.clear()
@@ -84,6 +85,10 @@ describe('session-loader: createLoaderActions', () => {
       activeSessionId: null,
       isLoading: false,
       messageQueue: [],
+      pendingPermissions: [],
+      pendingQuestions: [],
+      pendingQuestionIdsBySession: {},
+      sessionStatuses: {},
       todos: [],
       sessionDiff: [],
       error: null,
@@ -194,6 +199,16 @@ describe('session-loader: createLoaderActions', () => {
       error: 'Network error',
       isLoading: false,
     }))
+  })
+
+  it('resetSessions clears pending activity maps', () => {
+    state.pendingQuestionIdsBySession = { 'sess-1': ['question-1'] }
+    state.sessionStatuses = { 'sess-1': { type: 'busy' } }
+
+    actions.resetSessions()
+
+    expect(state.pendingQuestionIdsBySession).toEqual({})
+    expect(state.sessionStatuses).toEqual({})
   })
 
   it('createSession calls API, adds session to state, tracks self-created', async () => {

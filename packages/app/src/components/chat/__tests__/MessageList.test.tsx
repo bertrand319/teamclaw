@@ -4,7 +4,7 @@ globalThis.ResizeObserver = vi.fn().mockImplementation(() => ({
   observe: vi.fn(), unobserve: vi.fn(), disconnect: vi.fn(),
 }))
 
-import { render } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { useSessionStore } from '@/stores/session';
 import { useStreamingStore } from '@/stores/streaming';
 import { MessageList } from '../MessageList';
@@ -111,5 +111,33 @@ describe('MessageList', () => {
     );
 
     expect(getByTestId('custom-empty')).toBeTruthy();
+  });
+
+  it('renders only the latest 80 messages initially and loads older messages on demand', () => {
+    const messages = Array.from({ length: 140 }, (_, index) =>
+      makeMessage({
+        id: `msg-${index.toString().padStart(3, '0')}`,
+        role: index % 2 === 0 ? 'user' : 'assistant',
+        content: `Message ${index}`,
+        timestamp: new Date(2024, 0, 1, 0, index),
+      }),
+    );
+
+    const { container } = render(
+      <MessageList
+        messages={messages}
+        activeSessionId="sess-1"
+        isStreaming={false}
+        streamingMessageId={null}
+      />,
+    );
+
+    expect(container.textContent).not.toContain('Message 0');
+    expect(container.textContent).toContain('Message 60');
+    expect(screen.getByText('Load 60 earlier messages')).toBeTruthy();
+
+    fireEvent.click(screen.getByText('Load 60 earlier messages'));
+
+    expect(container.textContent).toContain('Message 0');
   });
 });

@@ -52,6 +52,8 @@ export function createLoaderActions(set: SessionSet, get: SessionGet) {
         messageQueue: [],
         pendingPermissions: [],
         pendingQuestions: [],
+        pendingQuestionIdsBySession: {},
+        sessionStatuses: {},
         todos: [],
         sessionDiff: [],
         sessionError: null,
@@ -562,12 +564,20 @@ export function createLoaderActions(set: SessionSet, get: SessionGet) {
         set((state) => {
           const newSessions = state.sessions.filter((s) => s.id !== id);
           const pinnedSessionIds = state.pinnedSessionIds.filter((sessionId) => sessionId !== id);
+          const pendingQuestionIdsBySession = { ...(state.pendingQuestionIdsBySession || {}) };
+          delete pendingQuestionIdsBySession[id];
+          const sessionStatuses = { ...(state.sessionStatuses || {}) };
+          delete sessionStatuses[id];
           savePinnedSessionIds(state.currentWorkspacePath ?? directory ?? null, pinnedSessionIds);
           updateSessionCache(newSessions);
 
           return {
             sessions: newSessions,
             pinnedSessionIds,
+            pendingQuestions: state.pendingQuestions.filter((q) => q.sessionId !== id),
+            pendingPermissions: state.pendingPermissions.filter((entry) => entry.childSessionId !== id),
+            pendingQuestionIdsBySession,
+            sessionStatuses,
             activeSessionId:
               state.activeSessionId === id
                 ? (newSessions[0]?.id ?? null)
