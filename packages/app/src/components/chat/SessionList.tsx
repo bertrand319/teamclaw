@@ -1,4 +1,5 @@
 import React, { useCallback, useMemo, useRef } from 'react'
+import { useTranslation } from 'react-i18next'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { MessageSquare, Loader2 } from 'lucide-react'
 import { useSessionStore } from '@/stores/session'
@@ -26,6 +27,7 @@ interface SessionListItemProps {
 }
 
 function SessionStatusIndicator({ compact }: { compact?: boolean }) {
+  const { t } = useTranslation()
   const sessionStatus = useSessionStore(s => s.sessionStatus)
   const pendingPermissions = useSessionStore(s => s.pendingPermissions)
   const pendingQuestions = useSessionStore(s => s.pendingQuestions)
@@ -34,7 +36,7 @@ function SessionStatusIndicator({ compact }: { compact?: boolean }) {
   if (pendingPermissions.length > 0 || pendingQuestions.length > 0) {
     return (
       <span className="shrink-0 text-[10px] font-medium text-emerald-600 bg-emerald-500/10 px-1.5 py-0.5 rounded-full">
-        等待确认
+        {t('chat.waitingForConfirmationShort', 'Waiting')}
       </span>
     )
   }
@@ -59,6 +61,8 @@ const SessionListItem = React.memo(function SessionListItem({
   onSelect,
   children,
 }: SessionListItemProps) {
+  const { t } = useTranslation()
+
   return (
     <div>
       <button
@@ -92,14 +96,14 @@ const SessionListItem = React.memo(function SessionListItem({
                 <SessionStatusIndicator compact={compact} />
               ) : isHighlighted ? (
                 <span className="shrink-0 text-[10px] font-medium text-emerald-600 bg-emerald-500/10 px-1.5 py-0.5 rounded-full">
-                  NEW
+                  {t('chat.newSessionBadge', 'NEW')}
                 </span>
               ) : null}
             </div>
             <span className={cn("text-muted-foreground/70", compact ? "text-xs" : "text-xs")}>
               {formatRelativeDate(session.updatedAt)}
               {session.messageCount !== undefined && (
-                <> · {session.messageCount} msgs</>
+                <> · {t('chat.messageCountShort', { count: session.messageCount })}</>
               )}
             </span>
           </div>
