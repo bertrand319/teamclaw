@@ -67,6 +67,7 @@ const WORKSPACE_QUICK_SECTIONS: {
 
 // Status indicator for the active session in the sidebar
 function SidebarSessionStatusIndicator() {
+  const { t } = useTranslation()
   const sessionStatus = useSessionStore(s => s.sessionStatus)
   const pendingPermissions = useSessionStore(s => s.pendingPermissions)
   const pendingQuestions = useSessionStore(s => s.pendingQuestions)
@@ -75,7 +76,7 @@ function SidebarSessionStatusIndicator() {
   if (pendingPermissions.length > 0 || pendingQuestions.length > 0) {
     return (
       <span className="shrink-0 text-[10px] font-medium text-emerald-500 bg-emerald-500/10 px-1.5 py-0.5 rounded-full">
-        等待确认
+        {t('chat.waitingForConfirmationShort', 'Waiting')}
       </span>
     )
   }
@@ -220,7 +221,7 @@ export function SidebarSecondarySessionActions({
         className="h-7 w-7 text-muted-foreground hover:text-foreground disabled:opacity-40"
         disabled={!hasWorkspace}
         onClick={() => includeSearchDialog && setSearchOpen(true)}
-        title={hasWorkspace ? "Search (⌘K)" : t('sidebar.selectWorkspaceFirst', 'Please select a workspace first')}
+        title={hasWorkspace ? t('sidebar.searchWithShortcut', 'Search (⌘K)') : t('sidebar.selectWorkspaceFirst', 'Please select a workspace first')}
       >
         <Search className="h-4 w-4" />
       </Button>
@@ -282,7 +283,7 @@ export function SidebarSecondarySessionActions({
                 )}
                 disabled={!hasWorkspace}
                 onClick={() => includeSearchDialog && setSearchOpen(true)}
-                title={hasWorkspace ? "Search (⌘K)" : t('sidebar.selectWorkspaceFirst', 'Please select a workspace first')}
+                title={hasWorkspace ? t('sidebar.searchWithShortcut', 'Search (⌘K)') : t('sidebar.selectWorkspaceFirst', 'Please select a workspace first')}
               >
                 <Search className="h-4 w-4" />
               </Button>
@@ -376,7 +377,10 @@ function DefaultKnowledgeHeaderControls({
       }>('team_sync_repo', { force: false, workspacePath })
       if (result.needsConfirmation) {
         const { toast } = await import('sonner')
-        toast.warning(`检测到 ${result.newFiles?.length ?? 0} 个较大的新文件待同步，请在设置 → 团队中确认`)
+        toast.warning(t('settings.team.syncPrecheckToast', {
+          count: result.newFiles?.length ?? 0,
+          defaultValue: 'Detected {{count}} large new files to sync. Confirm in Settings > Team.',
+        }))
         return
       }
       const { toast } = await import('sonner')
@@ -395,7 +399,7 @@ function DefaultKnowledgeHeaderControls({
       setSyncing(false)
       useTeamModeStore.setState({ teamGitSyncing: false })
     }
-  }, [refreshFileTree, syncing, workspacePath])
+  }, [refreshFileTree, syncing, t, workspacePath])
 
   const iconButtonClass =
     'h-7 w-7 shrink-0 rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground'
@@ -837,7 +841,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                   )}
                   {session.id !== activeSessionId && isHighlighted && (
                     <span className="shrink-0 text-[10px] font-medium text-emerald-500 bg-emerald-500/10 px-1.5 py-0.5 rounded-full">
-                      NEW
+                      {t('chat.newSessionBadge', 'NEW')}
                     </span>
                   )}
                 </>
@@ -848,7 +852,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                 <span className="text-[10px] text-muted-foreground">
                   {formatDate(session.updatedAt)}
                   {session.messageCount !== undefined && (
-                    <> · {session.messageCount} messages</>
+                    <> · {t('chat.messageCountShort', { count: session.messageCount })}</>
                   )}
                 </span>
                 {session.id === activeSessionId && (

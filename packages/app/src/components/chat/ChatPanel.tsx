@@ -836,7 +836,7 @@ export function ChatPanel({ compact = false }: ChatPanelProps) {
             className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
           >
             <ArrowLeft size={14} />
-            <span>返回主会话</span>
+            <span>{t("chat.backToMainSession", "Back to main session")}</span>
           </button>
           <div className="flex items-center gap-1.5 ml-auto text-xs text-muted-foreground">
             <Bot size={12} />
