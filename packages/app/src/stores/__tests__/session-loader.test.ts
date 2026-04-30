@@ -261,6 +261,57 @@ describe('session-loader: createLoaderActions', () => {
     expect(mockGetMessages).toHaveBeenCalledWith('sess-1')
   })
 
+  it('setActiveSession keeps pending permissions so sidebar approval state survives session switches', async () => {
+    const now = Date.now()
+    state.sessions = [
+      {
+        id: 'sess-1',
+        title: 'Waiting',
+        messages: [],
+        createdAt: new Date(now),
+        updatedAt: new Date(now),
+      },
+      {
+        id: 'sess-2',
+        title: 'Target',
+        messages: [],
+        createdAt: new Date(now),
+        updatedAt: new Date(now),
+      },
+    ]
+    state.activeSessionId = 'sess-1'
+    state.pendingPermissions = [
+      {
+        permission: {
+          id: 'perm-1',
+          sessionID: 'sess-1',
+          permission: 'bash',
+          patterns: ['ls'],
+        },
+        childSessionId: null,
+        ownerSessionId: 'sess-1',
+      },
+    ]
+
+    mockGetMessages.mockResolvedValue([])
+    mockGetSession.mockResolvedValue({
+      id: 'sess-2',
+      title: 'Target',
+      time: { created: now, updated: now },
+    })
+    mockGetTodos.mockResolvedValue([])
+    mockGetSessionDiff.mockResolvedValue([])
+
+    await actions.setActiveSession('sess-2')
+
+    expect(state.pendingPermissions).toEqual([
+      expect.objectContaining({
+        permission: expect.objectContaining({ id: 'perm-1' }),
+        ownerSessionId: 'sess-1',
+      }),
+    ])
+  })
+
   it('archiveSession removes the session from pinned ids', async () => {
     const now = Date.now()
     state.sessions = [{

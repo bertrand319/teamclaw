@@ -47,6 +47,8 @@ import {
 import { workspacePathsMatch } from "./session-utils";
 import {
   removeSessionActivityEntries,
+  resolvePendingPermissionActivityOwner,
+  resolvePendingQuestionActivityOwner,
   updateSessionStatusEntry,
 } from "@/lib/session-list-activity";
 
@@ -527,8 +529,6 @@ export function createLifecycleHandlers(set: SessionSet, get: SessionGet) {
               sessionStatuses: updateSessionStatusEntry(state.sessionStatuses || {}, event.sessionId, status),
               sessionError: null,
               sessions: newSessions,
-              pendingPermissions: [],
-              pendingQuestions: [],
             };
           });
         } else {
@@ -536,8 +536,6 @@ export function createLifecycleHandlers(set: SessionSet, get: SessionGet) {
             sessionStatus: status,
             sessionStatuses: updateSessionStatusEntry(state.sessionStatuses || {}, event.sessionId, status),
             sessionError: state.sessionError?.error?.name === 'RetryError' ? null : state.sessionError,
-            pendingPermissions: [],
-            pendingQuestions: [],
           }));
         }
       } else {
@@ -574,11 +572,25 @@ export function createLifecycleHandlers(set: SessionSet, get: SessionGet) {
         // CRITICAL: Do NOT clear streaming if session is waiting for user interaction
         // When AI asks a question or requests permission, OpenCode sends session.idle
         // but the session is still active (waiting for user response)
-        if (pendingQuestions.length > 0 || pendingPermissions.length > 0) {
+        const hasPendingQuestionForActiveSession = pendingQuestions.some(
+          (question) =>
+            resolvePendingQuestionActivityOwner(question, currentSessions, activeSessionId) === activeSessionId,
+        );
+        const hasPendingPermissionForActiveSession = pendingPermissions.some(
+          (permission) =>
+            resolvePendingPermissionActivityOwner(permission, currentSessions, activeSessionId) === activeSessionId,
+        );
+        if (hasPendingQuestionForActiveSession || hasPendingPermissionForActiveSession) {
           console.log("[SessionIdle] Session waiting for user interaction, preserving streaming state:", {
             streamingMessageId,
-            pendingQuestionsCount: pendingQuestions.length,
-            pendingPermissionsCount: pendingPermissions.length,
+            pendingQuestionsCount: pendingQuestions.filter(
+              (question) =>
+                resolvePendingQuestionActivityOwner(question, currentSessions, activeSessionId) === activeSessionId,
+            ).length,
+            pendingPermissionsCount: pendingPermissions.filter(
+              (permission) =>
+                resolvePendingPermissionActivityOwner(permission, currentSessions, activeSessionId) === activeSessionId,
+            ).length,
           });
           // Keep streaming state active so:
           // 1. Typewriter continues if there's buffered content

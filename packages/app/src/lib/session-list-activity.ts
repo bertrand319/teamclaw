@@ -111,6 +111,31 @@ export function resolveSessionActivityOwner(
   return fallbackSessionId || startingId;
 }
 
+export function resolvePendingPermissionActivityOwner(
+  entry: PendingPermissionEntry,
+  sessions: Pick<Session, "id" | "parentID">[],
+  fallbackSessionId?: string | null,
+): string | null {
+  if (entry.ownerSessionId) return entry.ownerSessionId;
+  return resolveSessionActivityOwner(
+    entry.childSessionId || entry.permission.sessionID,
+    sessions,
+    entry.permission.sessionID || fallbackSessionId,
+  );
+}
+
+export function resolvePendingQuestionActivityOwner(
+  question: Pick<PendingQuestionState, "sessionId">,
+  sessions: Pick<Session, "id" | "parentID">[],
+  fallbackSessionId?: string | null,
+): string | null {
+  return resolveSessionActivityOwner(
+    question.sessionId,
+    sessions,
+    question.sessionId || fallbackSessionId,
+  );
+}
+
 function pickHigherPriority(
   current: SessionListActivity | undefined,
   next: SessionListActivity,
@@ -185,7 +210,7 @@ export function buildSessionListActivityMap({
   }
 
   for (const permission of pendingPermissions) {
-    mark(permission.childSessionId || permission.permission.sessionID || activeSessionId, {
+    mark(resolvePendingPermissionActivityOwner(permission, sessions, activeSessionId), {
       state: "waiting",
       kind: "permission",
     });

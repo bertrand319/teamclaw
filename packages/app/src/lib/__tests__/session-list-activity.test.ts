@@ -88,4 +88,37 @@ describe("session-list-activity", () => {
     );
     expect(map.get("parent-1")).toBeUndefined();
   });
+
+  it("attributes unknown child permission activity to its stored owner session", () => {
+    const map = buildSessionListActivityMap({
+      sessions,
+      activeSessionId: "standalone",
+      sessionStatuses: {
+        "parent-1": { type: "busy" },
+      },
+      pendingQuestionIdsBySession: {},
+      pendingQuestions: [],
+      pendingPermissions: [
+        {
+          childSessionId: "child-not-yet-loaded",
+          ownerSessionId: "parent-1",
+          permission: {
+            id: "perm-child",
+            sessionID: "child-not-yet-loaded",
+            permission: "bash",
+          },
+        },
+      ],
+      streamingMessageId: null,
+      streamingChildSessionIds: [],
+    });
+
+    expect(map.get("parent-1")).toEqual(
+      expect.objectContaining({
+        state: "waiting",
+        kind: "permission",
+      }),
+    );
+    expect(map.get("child-not-yet-loaded")).toBeUndefined();
+  });
 });

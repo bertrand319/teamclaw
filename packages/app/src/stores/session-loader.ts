@@ -311,7 +311,6 @@ export function createLoaderActions(set: SessionSet, get: SessionGet) {
         sessionDiff: cachedData?.diff || [],
         sessionError: null,
         sessionStatus: null,
-        pendingPermissions: [],
         pendingQuestions: cachedData?.pendingQuestions || [],
       });
 
@@ -581,7 +580,10 @@ export function createLoaderActions(set: SessionSet, get: SessionGet) {
             pinnedSessionIds,
             pendingQuestions: state.pendingQuestions.filter((q) => q.sessionId !== id),
             pendingPermissions: state.pendingPermissions.filter(
-              (entry) => entry.childSessionId !== id && entry.permission.sessionID !== id,
+              (entry) =>
+                entry.childSessionId !== id &&
+                entry.permission.sessionID !== id &&
+                entry.ownerSessionId !== id,
             ),
             pendingQuestionIdsBySession,
             sessionStatuses,

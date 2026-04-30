@@ -140,4 +140,39 @@ describe('MessageList', () => {
 
     expect(container.textContent).toContain('Message 0');
   });
+
+  it('keeps completed assistant token usage visible while a pending assistant is streaming', () => {
+    const completedAssistant = makeMessage({
+      id: 'assistant-complete',
+      role: 'assistant',
+      content: 'Done',
+      timestamp: new Date('2024-01-01T10:00:00Z'),
+      tokens: {
+        input: 2500,
+        output: 33,
+        reasoning: 0,
+        cache: { read: 0, write: 0 },
+      },
+    });
+    const pendingAssistant = makeMessage({
+      id: 'pending-assistant',
+      role: 'assistant',
+      content: '',
+      timestamp: new Date('2024-01-01T10:01:00Z'),
+      isStreaming: true,
+    });
+
+    const { container } = render(
+      <MessageList
+        messages={[completedAssistant, pendingAssistant]}
+        activeSessionId="sess-1"
+        isStreaming={true}
+        streamingMessageId="pending-assistant"
+      />,
+    );
+
+    expect(container.textContent).toContain('↓2.5k');
+    expect(container.textContent).toContain('↑33');
+    expect(container.textContent).toContain('tokens');
+  });
 });
