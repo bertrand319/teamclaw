@@ -14,6 +14,36 @@ fn deep_merge(base: &mut serde_json::Value, overlay: serde_json::Value) {
     }
 }
 
+fn resolve_updater_url(url: &str) -> Option<String> {
+    if url.contains("__OSS_BASE_URL__") {
+        let oss_base = std::env::var("OSS_BASE_URL")
+            .ok()
+            .map(|s| s.trim_end_matches('/').to_string())
+            .filter(|s| !s.is_empty())?;
+        Some(url.replace("__OSS_BASE_URL__", &oss_base))
+    } else if url.is_empty() {
+        None
+    } else {
+        Some(url.to_string())
+    }
+}
+
+fn resolve_updater_endpoint(config: &serde_json::Value) -> Option<String> {
+    let updater = &config["app"]["updater"];
+    if let Some(endpoint) = updater["endpoint"].as_str().and_then(resolve_updater_url) {
+        return Some(endpoint);
+    }
+
+    updater["endpoints"]
+        .as_array()
+        .and_then(|endpoints| {
+            endpoints
+                .iter()
+                .filter_map(|endpoint| endpoint.as_str())
+                .find_map(resolve_updater_url)
+        })
+}
+
 fn main() {
     // ── Read build config: base → env → local (mirrors vite.config.ts) ──
     let root_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -32,10 +62,8 @@ fn main() {
         let env_path = root_dir.join(format!("build.config.{}.json", build_env));
         println!("cargo:rerun-if-changed={}", env_path.display());
         if let Ok(s) = std::fs::read_to_string(&env_path) {
-            let env_config: serde_json::Value = serde_json::from_str(&s).expect(&format!(
-                "build.config.{}.json is not valid JSON",
-                build_env
-            ));
+            let env_config: serde_json::Value = serde_json::from_str(&s)
+                .unwrap_or_else(|_| panic!("build.config.{}.json is not valid JSON", build_env));
             deep_merge(&mut config, env_config);
         }
     }
@@ -75,7 +103,7 @@ fn main() {
     println!("cargo:warning=Using APP_SHORT_NAME={}", short_name);
 
     // Export updater config from build.config.json
-    if let Some(endpoint) = config["app"]["updater"]["endpoint"].as_str() {
+    if let Some(endpoint) = resolve_updater_endpoint(&config) {
         println!("cargo:rustc-env=UPDATER_ENDPOINT={}", endpoint);
         println!("cargo:warning=Using UPDATER_ENDPOINT={}", endpoint);
     }
@@ -85,7 +113,16 @@ fn main() {
     }
 
     // Export device JWT secret for HS256 token generation.
-    let device_jwt_secret = config["device"]["jwtSecret"].as_str().unwrap_or("");
+    // Priority: DEVICE_JWT_SECRET env var (CI secret) > build.config.json device.jwtSecret
+    let device_jwt_secret = std::env::var("DEVICE_JWT_SECRET")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            config["device"]["jwtSecret"]
+                .as_str()
+                .unwrap_or("")
+                .to_string()
+        });
     println!("cargo:rustc-env=DEVICE_JWT_SECRET={}", device_jwt_secret);
     if device_jwt_secret.is_empty() {
         println!("cargo:warning=device.jwtSecret is not set — device token generation will fail at runtime");
@@ -119,11 +156,28 @@ fn main() {
         );
     }
 
-    // ── Compile protobuf ──
-    let proto_path = root_dir.join("proto/teamclaw.proto");
-    println!("cargo:rerun-if-changed={}", proto_path.display());
-    prost_build::compile_protos(&[&proto_path], &[root_dir.join("proto")])
-        .expect("Failed to compile teamclaw.proto");
+    // Check that the teamclaw-introspect sidecar binary exists.
+    // Unlike opencode (downloaded), this is built from crates/teamclaw-introspect.
+    // rust-cli.js auto-builds it before invoking cargo.
+    let introspect_bin = format!("binaries/teamclaw-introspect-{}", target_triple);
+    let introspect_bin_exe = format!("{}.exe", introspect_bin);
+    let introspect_exists = std::path::Path::new(&introspect_bin).exists()
+        || (target_triple.contains("windows")
+            && std::path::Path::new(&introspect_bin_exe).exists());
+    if !introspect_exists && !in_ci {
+        panic!(
+            "\n\n\
+            ╔══════════════════════════════════════════════════════════════╗\n\
+            ║  teamclaw-introspect sidecar binary not found!             ║\n\
+            ║                                                            ║\n\
+            ║  Build it with:                                            ║\n\
+            ║    cargo build -p teamclaw-introspect                      ║\n\
+            ║    cp target/debug/teamclaw-introspect {:<20}║\n\
+            ╚══════════════════════════════════════════════════════════════╝\n\n",
+            introspect_bin
+        );
+    }
+    println!("cargo:rerun-if-changed={}", introspect_bin);
 
     tauri_build::build()
 }

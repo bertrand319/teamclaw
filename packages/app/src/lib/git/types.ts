@@ -21,6 +21,17 @@ export interface GitStatusResult {
   clean: boolean
 }
 
+/** A single commit entry from `git log --follow` for a file */
+export interface GitLogEntry {
+  sha: string
+  /** First-parent SHA. Empty string for the initial commit. */
+  parentSha: string
+  author: string
+  /** Strict ISO 8601 (e.g. "2026-04-27T10:00:00+00:00"). */
+  isoTime: string
+  subject: string
+}
+
 // ─── Repository Types ──────────────────────────────────────────────────────
 
 /** Source type of a git-managed repository */
@@ -100,6 +111,8 @@ export interface TeamMember {
   name: string
   /** Member role: owner, manager, editor, or viewer */
   role?: 'owner' | 'manager' | 'editor' | 'viewer'
+  /** Shortcut visibility roles used to filter team shortcuts */
+  shortcutsRole?: string[]
   /** Human-readable label */
   label: string
   /** OS name */

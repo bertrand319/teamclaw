@@ -101,29 +101,40 @@ async fn p2p_update_member_role_and_sync(
     }
 
     let previous_role = super::team_p2p::read_members_manifest(&team_dir)?
-        .map(|manifest| {
+        .and_then(|manifest| {
             manifest
                 .members
                 .into_iter()
                 .find(|member| member.node_id == node_id)
                 .map(|member| member.role)
         })
-        .flatten()
         .or_else(|| {
-            super::team_p2p::read_p2p_config(workspace_path, super::TEAMCLAW_DIR, super::CONFIG_FILE_NAME)
-                .ok()
-                .flatten()
-                .and_then(|config| {
-                    config
-                        .allowed_members
-                        .into_iter()
-                        .find(|member| member.node_id == node_id)
-                        .map(|member| member.role)
-                })
+            super::team_p2p::read_p2p_config(
+                workspace_path,
+                super::TEAMCLAW_DIR,
+                super::CONFIG_FILE_NAME,
+            )
+            .ok()
+            .flatten()
+            .and_then(|config| {
+                config
+                    .allowed_members
+                    .into_iter()
+                    .find(|member| member.node_id == node_id)
+                    .map(|member| member.role)
+            })
         })
         .ok_or_else(|| "Member not found".to_string())?;
 
-    super::team_p2p::update_member_role(workspace_path, &team_dir, &caller_node_id, node_id, role, super::TEAMCLAW_DIR, super::CONFIG_FILE_NAME)?;
+    super::team_p2p::update_member_role(
+        workspace_path,
+        &team_dir,
+        &caller_node_id,
+        node_id,
+        role,
+        super::TEAMCLAW_DIR,
+        super::CONFIG_FILE_NAME,
+    )?;
 
     let manifest_path = format!("{}/{}", team_dir, "_team/members.json");
     let content = match std::fs::read(&manifest_path) {
@@ -168,24 +179,86 @@ async fn p2p_update_member_role_and_sync(
     Ok(())
 }
 
+// ─── Git mode manifest helpers ──────────────────────────────────────────────
+
+fn git_manifest_path(workspace_path: &str) -> std::path::PathBuf {
+    std::path::Path::new(workspace_path)
+        .join(super::TEAM_REPO_DIR)
+        .join("_meta")
+        .join("members.json")
+}
+
+/// Read the Git team manifest without creating files.
+///
+/// Git clone requires the target `teamclaw-team` path to be absent or empty.
+/// During invite-code joins the UI can briefly mark team mode as enabled while
+/// the clone is still running in the background; member reads must not create
+/// `_meta/members.json` in that window.
+fn read_git_manifest(workspace_path: &str) -> Result<TeamManifest, String> {
+    let path = git_manifest_path(workspace_path);
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read _meta/members.json: {}", e))?;
+    serde_json::from_str(&content).map_err(|e| format!("Failed to parse members.json: {}", e))
+}
+
+fn write_git_manifest(workspace_path: &str, manifest: &TeamManifest) -> Result<(), String> {
+    let path = git_manifest_path(workspace_path);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let json = serde_json::to_string_pretty(manifest)
+        .map_err(|e| format!("Failed to serialize members.json: {}", e))?;
+    std::fs::write(&path, json).map_err(|e| format!("Failed to write members.json: {}", e))
+}
+
+#[cfg(test)]
+mod git_manifest_tests {
+    use super::*;
+
+    #[test]
+    fn read_git_manifest_does_not_create_team_dir_when_missing() {
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let workspace_path = workspace_dir.path().to_string_lossy().to_string();
+        let team_dir = workspace_dir.path().join(crate::commands::TEAM_REPO_DIR);
+
+        let result = read_git_manifest(&workspace_path);
+
+        assert!(result.is_err());
+        assert!(!team_dir.exists());
+    }
+}
+
 /// Get the list of team members from the active sync mode.
-/// - OSS: downloads members manifest from S3
+/// - OSS: reads from local cache, falls back to S3
 /// - P2P: reads from p2p config's allowed_members
+/// - Git: reads from teamclaw-team/_meta/members.json
 #[tauri::command]
 pub async fn unified_team_get_members(
+    workspace_path: Option<String>,
     opencode_state: State<'_, super::opencode::OpenCodeState>,
     oss_state: State<'_, super::oss_sync::OssSyncState>,
     iroh_state: State<'_, super::p2p_state::IrohState>,
 ) -> Result<Vec<TeamMember>, String> {
-    let workspace_path = super::team::get_workspace_path(&opencode_state)?;
+    let workspace_path = super::team::resolve_workspace_path(workspace_path, &opencode_state)?;
     let status = super::team::check_team_status(&workspace_path);
 
     match status.mode.as_deref() {
         Some("oss") => {
+            // Read from local cache first (synced every ~5 min), fall back to S3
+            let cache_path = std::path::Path::new(&workspace_path)
+                .join(super::TEAMCLAW_DIR)
+                .join("_team")
+                .join("members.json");
+            if let Ok(content) = std::fs::read_to_string(&cache_path) {
+                if let Ok(manifest) = serde_json::from_str::<TeamManifest>(&content) {
+                    return Ok(manifest.members);
+                }
+            }
+            // Cache miss — download from S3
             let guard = oss_state.manager.lock().await;
             let manager = guard.as_ref().ok_or("OSS sync not initialized")?;
             let manifest = manager
-                .download_members_manifest()
+                .download_and_cache_members_manifest()
                 .await?
                 .ok_or("No members manifest found")?;
             Ok(manifest.members)
@@ -200,9 +273,18 @@ pub async fn unified_team_get_members(
             if let Ok(Some(manifest)) = super::team_p2p::read_members_manifest(&team_dir) {
                 Ok(manifest.members)
             } else {
-                let config = super::team_p2p::read_p2p_config(&workspace_path, super::TEAMCLAW_DIR, super::CONFIG_FILE_NAME)?.unwrap_or_default();
+                let config = super::team_p2p::read_p2p_config(
+                    &workspace_path,
+                    super::TEAMCLAW_DIR,
+                    super::CONFIG_FILE_NAME,
+                )?
+                .unwrap_or_default();
                 Ok(config.allowed_members)
             }
+        }
+        Some("git") => {
+            let manifest = read_git_manifest(&workspace_path)?;
+            Ok(manifest.members)
         }
         Some(mode) => Err(format!(
             "Member management not supported for mode: {}",
@@ -217,13 +299,14 @@ pub async fn unified_team_get_members(
 #[tauri::command]
 pub async fn unified_team_add_member(
     member: TeamMember,
+    workspace_path: Option<String>,
     opencode_state: State<'_, super::opencode::OpenCodeState>,
     oss_state: State<'_, super::oss_sync::OssSyncState>,
     iroh_state: State<'_, super::p2p_state::IrohState>,
 ) -> Result<(), String> {
     validate_node_id(&member.node_id)?;
 
-    let workspace_path = super::team::get_workspace_path(&opencode_state)?;
+    let workspace_path = super::team::resolve_workspace_path(workspace_path, &opencode_state)?;
     let status = super::team::check_team_status(&workspace_path);
 
     match status.mode.as_deref() {
@@ -301,6 +384,16 @@ pub async fn unified_team_add_member(
             drop(guard);
             Ok(())
         }
+        Some("git") => {
+            // Git mode: anyone with repo access can manage members
+            let mut manifest = read_git_manifest(&workspace_path)?;
+            if manifest.members.iter().any(|m| m.node_id == member.node_id) {
+                return Err("Member already exists".to_string());
+            }
+            manifest.members.push(member);
+            write_git_manifest(&workspace_path, &manifest)?;
+            Ok(())
+        }
         Some(mode) => Err(format!(
             "Member management not supported for mode: {}",
             mode
@@ -314,11 +407,12 @@ pub async fn unified_team_add_member(
 #[tauri::command]
 pub async fn unified_team_remove_member(
     node_id: String,
+    workspace_path: Option<String>,
     opencode_state: State<'_, super::opencode::OpenCodeState>,
     oss_state: State<'_, super::oss_sync::OssSyncState>,
     iroh_state: State<'_, super::p2p_state::IrohState>,
 ) -> Result<(), String> {
-    let workspace_path = super::team::get_workspace_path(&opencode_state)?;
+    let workspace_path = super::team::resolve_workspace_path(workspace_path, &opencode_state)?;
     let status = super::team::check_team_status(&workspace_path);
 
     match status.mode.as_deref() {
@@ -348,13 +442,17 @@ pub async fn unified_team_remove_member(
                         .to_string(),
                 );
             }
-            let member_snapshot = super::team_p2p::read_p2p_config(&workspace_path, super::TEAMCLAW_DIR, super::CONFIG_FILE_NAME)?
-                .ok_or_else(|| "No P2P config found".to_string())?
-                .allowed_members
-                .iter()
-                .find(|m| m.node_id == node_id)
-                .cloned()
-                .ok_or_else(|| "Member not found".to_string())?;
+            let member_snapshot = super::team_p2p::read_p2p_config(
+                &workspace_path,
+                super::TEAMCLAW_DIR,
+                super::CONFIG_FILE_NAME,
+            )?
+            .ok_or_else(|| "No P2P config found".to_string())?
+            .allowed_members
+            .iter()
+            .find(|m| m.node_id == node_id)
+            .cloned()
+            .ok_or_else(|| "Member not found".to_string())?;
 
             super::team_p2p::remove_member_from_team(
                 &workspace_path,
@@ -415,6 +513,12 @@ pub async fn unified_team_remove_member(
             drop(guard);
             Ok(())
         }
+        Some("git") => {
+            let mut manifest = read_git_manifest(&workspace_path)?;
+            manifest.members.retain(|m| m.node_id != node_id);
+            write_git_manifest(&workspace_path, &manifest)?;
+            Ok(())
+        }
         Some(mode) => Err(format!(
             "Member management not supported for mode: {}",
             mode
@@ -429,11 +533,12 @@ pub async fn unified_team_remove_member(
 pub async fn unified_team_update_member_role(
     node_id: String,
     role: MemberRole,
+    workspace_path: Option<String>,
     opencode_state: State<'_, super::opencode::OpenCodeState>,
     oss_state: State<'_, super::oss_sync::OssSyncState>,
     iroh_state: State<'_, super::p2p_state::IrohState>,
 ) -> Result<(), String> {
-    let workspace_path = super::team::get_workspace_path(&opencode_state)?;
+    let workspace_path = super::team::resolve_workspace_path(workspace_path, &opencode_state)?;
     let status = super::team::check_team_status(&workspace_path);
 
     match status.mode.as_deref() {
@@ -456,6 +561,16 @@ pub async fn unified_team_update_member_role(
             p2p_update_member_role_and_sync(&workspace_path, iroh_state.inner(), &node_id, role)
                 .await
         }
+        Some("git") => {
+            let mut manifest = read_git_manifest(&workspace_path)?;
+            if let Some(member) = manifest.members.iter_mut().find(|m| m.node_id == node_id) {
+                member.role = role;
+            } else {
+                return Err("Member not found".to_string());
+            }
+            write_git_manifest(&workspace_path, &manifest)?;
+            Ok(())
+        }
         Some(mode) => Err(format!(
             "Member management not supported for mode: {}",
             mode
@@ -467,11 +582,12 @@ pub async fn unified_team_update_member_role(
 /// Get the current device's role in the active team.
 #[tauri::command]
 pub async fn unified_team_get_my_role(
+    workspace_path: Option<String>,
     opencode_state: State<'_, super::opencode::OpenCodeState>,
     oss_state: State<'_, super::oss_sync::OssSyncState>,
     iroh_state: State<'_, super::p2p_state::IrohState>,
 ) -> Result<MemberRole, String> {
-    let workspace_path = super::team::get_workspace_path(&opencode_state)?;
+    let workspace_path = super::team::resolve_workspace_path(workspace_path, &opencode_state)?;
     let status = super::team::check_team_status(&workspace_path);
 
     match status.mode.as_deref() {
@@ -489,11 +605,22 @@ pub async fn unified_team_get_my_role(
         #[cfg(feature = "p2p")]
         Some("p2p") => {
             let _ = iroh_state;
-            let config =
-                super::team_p2p::read_p2p_config(&workspace_path, super::TEAMCLAW_DIR, super::CONFIG_FILE_NAME)?.ok_or("No P2P config found")?;
+            let config = super::team_p2p::read_p2p_config(
+                &workspace_path,
+                super::TEAMCLAW_DIR,
+                super::CONFIG_FILE_NAME,
+            )?
+            .ok_or("No P2P config found")?;
             config
                 .role
                 .ok_or_else(|| "Role not set in P2P config".to_string())
+        }
+        Some("git") => {
+            let my_node_id = super::oss_commands::get_device_id()?;
+            let manifest = read_git_manifest(&workspace_path)?;
+            // In Git mode, if device not in manifest, treat as owner
+            // (anyone with repo access is implicitly authorized)
+            Ok(find_member_role(&manifest, &my_node_id).unwrap_or(MemberRole::Owner))
         }
         Some(mode) => Err(format!(
             "Member management not supported for mode: {}",
@@ -508,11 +635,12 @@ mod tests {
     use super::*;
     use crate::commands::team_p2p::{
         add_member_to_team, create_team, get_node_id, join_team_drive, read_members_manifest,
-        IrohNode, SyncEngine,
+        IrohNode,
     };
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
+    use teamclaw_p2p::SyncEngine;
     use tokio::sync::Mutex;
 
     struct TestPeer {
@@ -559,6 +687,7 @@ mod tests {
                 node_id: self.node_id(),
                 name: self.name.clone(),
                 role,
+                shortcuts_role: Vec::new(),
                 label: self.name.clone(),
                 platform: std::env::consts::OS.to_string(),
                 arch: std::env::consts::ARCH.to_string(),
@@ -574,14 +703,14 @@ mod tests {
                 &mut self.node,
                 &team_dir,
                 &workspace_path,
-                None,
-                None,
-                None,
                 Some("Unified Team Test".to_string()),
                 Some(self.name.clone()),
                 None,
                 None,
                 self.engine.clone(),
+                crate::commands::TEAMCLAW_DIR,
+                crate::commands::CONFIG_FILE_NAME,
+                crate::commands::TEAM_REPO_DIR,
             )
             .await
             .unwrap()
@@ -597,6 +726,9 @@ mod tests {
                 &workspace_path,
                 None,
                 self.engine.clone(),
+                crate::commands::TEAMCLAW_DIR,
+                crate::commands::CONFIG_FILE_NAME,
+                crate::commands::TEAM_REPO_DIR,
             )
             .await
             .unwrap();
@@ -643,6 +775,8 @@ mod tests {
             &owner.team_dir_path(),
             &owner.node_id(),
             joiner_member,
+            crate::commands::TEAMCLAW_DIR,
+            crate::commands::CONFIG_FILE_NAME,
         )
         .unwrap();
 

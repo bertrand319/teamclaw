@@ -1,56 +1,125 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::env;
-use std::sync::Mutex;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 use tokio::sync::mpsc;
 
-/// Default port for the OpenCode server.
-/// This is the single source of truth for the port number.
-const DEFAULT_PORT: u16 = 13141;
+use crate::process_util::CommandNoWindow;
 
-/// Mutable runtime state for the OpenCode sidecar, protected by a single Mutex.
+/// Default port for the OpenCode server.
+/// Used for the first/main workspace instance and for dev mode.
+pub const DEFAULT_PORT: u16 = 13141;
+const PLUGIN_UPDATE_TTL_SECS: u64 = 60 * 60 * 6;
+
+/// Mutable runtime state for a single OpenCode sidecar instance.
+/// Keyed by workspace_path inside `OpenCodeState::instances`.
 pub struct OpenCodeInner {
     pub is_running: bool,
     pub port: u16,
     pub child_process: Option<CommandChild>,
-    pub is_dev_mode: bool,
-    pub workspace_path: Option<String>,
     /// Handle to the async task monitoring sidecar stdout/stderr.
     /// Aborted on shutdown to prevent resource leaks.
     pub reader_task: Option<tauri::async_runtime::JoinHandle<()>>,
 }
 
-/// OpenCode server state
+/// OpenCode server state.
+///
+/// Multi-instance scaffolding: `instances` is keyed by workspace_path so that
+/// multiple windows can each run their own sidecar. In single-window flow the
+/// map holds at most one entry and `resolve_workspace(state, None)` returns
+/// it without needing an explicit workspace argument (back-compat).
 pub struct OpenCodeState {
-    pub inner: Mutex<OpenCodeInner>,
-    /// Async lock that serializes `start_opencode` calls to prevent concurrent spawns.
-    pub start_lock: tokio::sync::Mutex<()>,
+    /// Active sidecar instances, keyed by workspace_path.
+    pub instances: Mutex<HashMap<String, OpenCodeInner>>,
+    /// Per-workspace start locks that serialize concurrent `start_opencode`
+    /// calls for the same workspace (different workspaces can start in parallel).
+    pub start_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Early launch state — set by setup hook, consumed by start_opencode.
     pub early_launch: tokio::sync::Mutex<Option<EarlyLaunchState>>,
+    /// Process-wide dev mode flag (read from OPENCODE_DEV_MODE env var at startup).
+    pub is_dev_mode: bool,
 }
 
 impl Default for OpenCodeState {
     fn default() -> Self {
-        // Check if dev mode is enabled (external OpenCode server)
         let is_dev = env::var("OPENCODE_DEV_MODE")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
 
         Self {
-            inner: Mutex::new(OpenCodeInner {
-                is_running: false,
-                port: DEFAULT_PORT,
-                child_process: None,
-                is_dev_mode: is_dev,
-                workspace_path: None,
-                reader_task: None,
-            }),
-            start_lock: tokio::sync::Mutex::new(()),
+            instances: Mutex::new(HashMap::new()),
+            start_locks: Mutex::new(HashMap::new()),
             early_launch: tokio::sync::Mutex::new(None),
+            is_dev_mode: is_dev,
         }
     }
+}
+
+/// Pick a free TCP port on 127.0.0.1 by binding to port 0 and reading back.
+/// Used by Phase 2 to allocate ports for additional workspace windows.
+pub async fn find_available_port() -> Result<u16, String> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| format!("Failed to bind for port allocation: {}", e))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("Failed to read local addr: {}", e))?
+        .port();
+    drop(listener);
+    Ok(port)
+}
+
+/// Resolve which sidecar instance to operate on.
+///
+/// - `explicit = Some(ws)`: must exist in `instances`; returns its `(workspace_path, port)`.
+/// - `explicit = None` + 0 instances: error (no workspace selected yet).
+/// - `explicit = None` + 1 instance: returns that one (back-compat single-window).
+/// - `explicit = None` + 2+ instances: error (caller must pass an explicit workspace).
+pub fn resolve_workspace(
+    state: &OpenCodeState,
+    explicit: Option<&str>,
+) -> Result<(String, u16), String> {
+    let instances = state.instances.lock().map_err(|e| e.to_string())?;
+    if let Some(ws) = explicit {
+        match instances.get(ws) {
+            Some(inner) => Ok((ws.to_string(), inner.port)),
+            None => Err(format!("No OpenCode instance for workspace: {}", ws)),
+        }
+    } else {
+        match instances.len() {
+            0 => Err("No workspace path set. Please select a workspace first.".to_string()),
+            1 => {
+                let (ws, inner) = instances.iter().next().unwrap();
+                Ok((ws.clone(), inner.port))
+            }
+            n => Err(format!(
+                "{} OpenCode instances active; caller must specify workspace_path",
+                n
+            )),
+        }
+    }
+}
+
+/// Convenience wrapper around `resolve_workspace(state, None)` for callers that
+/// only need the workspace path (back-compat single-window).
+pub fn current_workspace_path(state: &OpenCodeState) -> Result<String, String> {
+    resolve_workspace(state, None).map(|(w, _)| w)
+}
+
+/// Get (or create) the per-workspace start lock.
+fn get_start_lock(
+    state: &OpenCodeState,
+    workspace_path: &str,
+) -> Result<Arc<tokio::sync::Mutex<()>>, String> {
+    let mut locks = state.start_locks.lock().map_err(|e| e.to_string())?;
+    Ok(locks
+        .entry(workspace_path.to_string())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -66,6 +135,18 @@ pub struct OpenCodeStatus {
     pub url: String,
     pub is_dev_mode: bool,
     pub workspace_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PluginUpdateTarget {
+    spec: String,
+    package_name: String,
+    auto_update: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PluginUpdateState {
+    last_checked_at_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -129,67 +210,87 @@ pub async fn start_opencode(
 }
 
 /// Core sidecar startup logic, shared between the Tauri command and early launch.
+///
+/// Phase 1 scaffolding semantics:
+/// - Sidecar instances live in `state.instances`, keyed by workspace_path.
+/// - For now `start_opencode` is treated as the "main slot" path: it uses
+///   `DEFAULT_PORT` (or `config.port` if explicitly given) and assumes the
+///   caller wants only one main-slot instance at a time. If a different
+///   workspace already occupies that slot, it is shut down before starting
+///   the new one — preserving today's single-window UX.
+/// - Phase 2 will add a separate `create_workspace_window` command path that
+///   uses `find_available_port()` to spawn additional sidecars without
+///   disturbing the main slot.
 pub async fn start_opencode_inner(
     app: AppHandle,
     state: &OpenCodeState,
     config: OpenCodeConfig,
 ) -> Result<OpenCodeStatus, String> {
     let inner_t0 = std::time::Instant::now();
-    // Serialize concurrent calls — only one start_opencode runs at a time.
-    let _start_guard = state.start_lock.lock().await;
+
+    let is_dev_mode = state.is_dev_mode;
+    let port = config.port.unwrap_or(DEFAULT_PORT);
+    let workspace_key = config.workspace_path.clone();
+
+    // Per-workspace start lock — concurrent starts for the same workspace serialize,
+    // but different workspaces may start in parallel.
+    let start_lock = get_start_lock(state, &workspace_key)?;
+    let _start_guard = start_lock.lock().await;
     eprintln!(
         "[Startup] start_opencode_inner: lock acquired in {:.1}ms",
         inner_t0.elapsed().as_secs_f64() * 1000.0
     );
 
-    let port = config.port.unwrap_or(DEFAULT_PORT);
-
-    // Check if already running (extract values and drop guard before any await)
-    let mut needs_restart = false;
-    let is_dev_mode;
+    // Already running for this workspace? Return cached status.
     {
-        let inner = state.inner.lock().map_err(|e| e.to_string())?;
-        is_dev_mode = inner.is_dev_mode;
-
-        if inner.is_running {
-            let workspace_changed = inner.workspace_path.as_ref() != Some(&config.workspace_path);
-
-            if !workspace_changed {
+        let instances = state.instances.lock().map_err(|e| e.to_string())?;
+        if let Some(inner) = instances.get(&workspace_key) {
+            if inner.is_running {
                 return Ok(OpenCodeStatus {
                     is_running: true,
                     port: inner.port,
                     url: format!("http://127.0.0.1:{}", inner.port),
                     is_dev_mode,
-                    workspace_path: inner.workspace_path.clone(),
+                    workspace_path: Some(workspace_key.clone()),
                 });
             }
-
-            println!(
-                "[OpenCode] Workspace changed from {:?} to {}, restarting...",
-                inner.workspace_path.as_ref(),
-                config.workspace_path
-            );
-
-            needs_restart = true;
         }
     }
 
-    if needs_restart {
-        // Stop the existing server
+    // Detect main-slot collision: another workspace already holds the same port.
+    // For Phase 1 (scaffolding), that means the user "switched workspace" in the
+    // single window — shut down the previous instance to free the port.
+    let conflicting_workspace: Option<String> = {
+        let instances = state.instances.lock().map_err(|e| e.to_string())?;
+        instances
+            .iter()
+            .find(|(ws, inner)| ws.as_str() != workspace_key && inner.port == port)
+            .map(|(ws, _)| ws.clone())
+    };
+
+    if let Some(prev_ws) = conflicting_workspace {
+        println!(
+            "[OpenCode] Port {} held by workspace {:?}, shutting it down before starting {}",
+            port, prev_ws, workspace_key
+        );
+        // Stop the previous instance
         if !is_dev_mode {
-            let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
-            if let Some(child) = inner.child_process.take() {
-                println!("[OpenCode] Killing previous process...");
-                let _ = child.kill();
+            let mut instances = state.instances.lock().map_err(|e| e.to_string())?;
+            if let Some(inner) = instances.get_mut(&prev_ws) {
+                if let Some(child) = inner.child_process.take() {
+                    println!("[OpenCode] Killing previous process...");
+                    let _ = child.kill();
+                }
+                if let Some(handle) = inner.reader_task.take() {
+                    handle.abort();
+                }
+                inner.is_running = false;
             }
-            // Abort old reader task
-            if let Some(handle) = inner.reader_task.take() {
-                handle.abort();
-            }
-            inner.is_running = false;
+            // Drop the entry entirely so we don't keep stale instances around.
+            instances.remove(&prev_ws);
         } else {
-            let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
-            inner.is_running = false;
+            let mut instances = state.instances.lock().map_err(|e| e.to_string())?;
+            instances.remove(&prev_ws);
         }
 
         // Wait for port to be released with exponential backoff
@@ -306,10 +407,16 @@ pub async fn start_opencode_inner(
 
         // Update state
         {
-            let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
-            inner.is_running = true;
-            inner.port = port;
-            inner.workspace_path = Some(requested_path.clone());
+            let mut instances = state.instances.lock().map_err(|e| e.to_string())?;
+            instances.insert(
+                requested_path.clone(),
+                OpenCodeInner {
+                    is_running: true,
+                    port,
+                    child_process: None,
+                    reader_task: None,
+                },
+            );
         }
 
         let url = format!("http://127.0.0.1:{}", port);
@@ -357,13 +464,13 @@ pub async fn start_opencode_inner(
     // Three branches run concurrently via tokio::join!:
     //   1. opencode.json writers (sequential: permissions → config → binary paths)
     //   2. ensure_inherent_skills (writes to .opencode/skills/, independent)
-    //   3. read_keyring_secrets (reads OS keyring, independent)
+    //   3. load_local_personal_secrets (reads local encrypted secret blob, independent)
     //
     // resolve_config_secret_refs runs AFTER all three complete (depends on
-    // both the config writers finishing and keyring secrets being available).
+    // both the config writers finishing and local personal secrets being available).
 
-    // Ensure system env vars exist (e.g. tc_api_key) before reading keyring secrets.
-    // Runs synchronously — one keychain read + optional write.
+    // Ensure system env vars exist (e.g. tc_api_key) before reading personal secrets.
+    // Runs synchronously before the local encrypted secret blob load.
     {
         let device_id = super::oss_commands::get_device_id().unwrap_or_default();
         let ws = workspace_path.clone();
@@ -383,9 +490,9 @@ pub async fn start_opencode_inner(
 
     let ws_for_config = workspace_path.clone();
     let ws_for_skills = workspace_path.clone();
-    let ws_for_keyring = workspace_path.clone();
+    let ws_for_personal_secrets = workspace_path.clone();
 
-    let (config_result, skills_result, keyring_result) = tokio::join!(
+    let (config_result, skills_result, personal_secrets_result) = tokio::join!(
         // Branch 1: opencode.json writers (must be sequential with each other)
         tokio::task::spawn_blocking(move || {
             if let Err(e) = ensure_default_permissions(&ws_for_config) {
@@ -400,8 +507,17 @@ pub async fn start_opencode_inner(
                     e
                 );
             }
+            if let Err(e) = ensure_team_provider(&ws_for_config) {
+                eprintln!("[OpenCode] Warning: failed to ensure team provider: {}", e);
+            }
             if let Err(e) = resolve_sidecar_binary_paths(&ws_for_config) {
                 eprintln!("[OpenCode] Warning: failed to resolve binary paths: {}", e);
+            }
+            if let Err(e) = refresh_npm_plugins_if_needed(&ws_for_config) {
+                eprintln!("[OpenCode] Warning: failed to refresh npm plugins: {}", e);
+            }
+            if let Err(e) = sync_global_auth_to_workspace(&ws_for_config) {
+                eprintln!("[OpenCode] Warning: failed to sync global auth: {}", e);
             }
         }),
         // Branch 2: inherent skills (writes to .opencode/skills/, no opencode.json conflict)
@@ -413,8 +529,8 @@ pub async fn start_opencode_inner(
                 );
             }
         }),
-        // Branch 3: keyring secrets
-        tokio::task::spawn_blocking(move || read_keyring_secrets(&ws_for_keyring))
+        // Branch 3: local personal secrets
+        tokio::task::spawn_blocking(move || load_local_personal_secrets(&ws_for_personal_secrets))
     );
 
     // Unwrap spawn results (panics inside spawn_blocking become JoinErrors)
@@ -425,18 +541,20 @@ pub async fn start_opencode_inner(
         eprintln!("[OpenCode] Skills setup task panicked: {}", e);
     }
 
-    let (mut secrets, failed_keys) = keyring_result.unwrap_or_else(|e| {
-        eprintln!("[OpenCode] spawn_blocking for keyring failed: {}", e);
+    let (mut secrets, failed_keys) = personal_secrets_result.unwrap_or_else(|e| {
+        eprintln!(
+            "[OpenCode] spawn_blocking for local personal secrets failed: {}",
+            e
+        );
         (Vec::new(), Vec::new())
     });
 
-    // Keyring retry logic (unchanged from original)
     if !failed_keys.is_empty() {
         if failed_keys == ["__blob__"] {
-            println!("[OpenCode] Keychain blob unavailable, retrying after keychain unlock...");
+            println!("[OpenCode] Local encrypted secret blob unavailable, retrying once...");
         } else {
             println!(
-                "[OpenCode] {} secret(s) failed to read ({:?}), retrying after keychain unlock...",
+                "[OpenCode] {} personal secret(s) failed to read ({:?}), retrying local encrypted blob load...",
                 failed_keys.len(),
                 failed_keys
             );
@@ -445,19 +563,24 @@ pub async fn start_opencode_inner(
 
         let ws_retry = workspace_path.clone();
         let (retry_secrets, still_failed) =
-            tokio::task::spawn_blocking(move || read_keyring_secrets(&ws_retry))
+            tokio::task::spawn_blocking(move || load_local_personal_secrets(&ws_retry))
                 .await
                 .unwrap_or_else(|e| {
-                    eprintln!("[OpenCode] spawn_blocking for keyring retry failed: {}", e);
+                    eprintln!(
+                        "[OpenCode] spawn_blocking for local personal secrets retry failed: {}",
+                        e
+                    );
                     (Vec::new(), Vec::new())
                 });
 
         if !still_failed.is_empty() {
             if still_failed == ["__blob__"] {
-                eprintln!("[OpenCode] Warning: keychain blob still unavailable after retry");
+                eprintln!(
+                    "[OpenCode] Warning: local encrypted secret blob still unavailable after retry"
+                );
             } else {
                 eprintln!(
-                    "[OpenCode] Warning: {} secret(s) still unavailable after retry: {:?}",
+                    "[OpenCode] Warning: {} personal secret(s) still unavailable after retry: {:?}",
                     still_failed.len(),
                     still_failed
                 );
@@ -468,56 +591,22 @@ pub async fn start_opencode_inner(
     }
 
     // Merge shared secrets (team KMS) into secrets vec.
-    // Shared secrets take priority over local keyring entries with the same key.
+    // Shared secrets take priority over local personal secrets with the same key.
     //
-    // Lazy init: if shared secrets haven't been initialized yet (e.g. early launch
-    // before oss_restore_sync), try to read team config and init from disk.
+    // On every (re)start: (1) lazy-init if needed — supports both OSS and Git
+    // teams via `try_lazy_init_from_workspace`, and (2) re-read the `_secrets/`
+    // directory unconditionally so we pick up envelopes that arrived via sync
+    // while the app was running (or while opencode was stopped).
     if let Some(shared_state) = app.try_state::<super::shared_secrets::SharedSecretsState>() {
+        if let Err(e) =
+            super::shared_secrets::try_lazy_init_from_workspace(&shared_state, &workspace_path)
         {
-            let dk = shared_state
-                .derived_key
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
-            if dk.is_none() {
-                drop(dk);
-                // Try to init from workspace team config
-                let config_path = format!(
-                    "{}/{}/{}",
-                    workspace_path,
-                    super::TEAMCLAW_DIR,
-                    super::CONFIG_FILE_NAME
-                );
-                if let Ok(content) = std::fs::read_to_string(&config_path) {
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                        if let Some(oss) = json.get("oss") {
-                            if let (Some(team_id), Some(true)) = (
-                                oss.get("teamId").and_then(|v| v.as_str()),
-                                oss.get("enabled").and_then(|v| v.as_bool()),
-                            ) {
-                                if let Ok(team_secret) =
-                                    super::oss_sync::load_team_secret(&workspace_path, team_id)
-                                {
-                                    let team_dir = std::path::Path::new(&workspace_path)
-                                        .join(super::TEAM_REPO_DIR);
-                                    match super::shared_secrets::init_shared_secrets(
-                                        &shared_state,
-                                        &team_secret,
-                                        &team_dir,
-                                    ) {
-                                        Ok(()) => println!(
-                                            "[OpenCode] Lazy-initialized shared secrets from disk"
-                                        ),
-                                        Err(e) => eprintln!(
-                                            "[OpenCode] Failed to lazy-init shared secrets: {}",
-                                            e
-                                        ),
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            // Not an error when the workspace has no team — expected for solo workspaces.
+            println!("[OpenCode] shared_secrets init skipped: {}", e);
+        }
+        if let Err(e) = super::shared_secrets::load_all_secrets(&shared_state) {
+            // Only surfaces when init also failed (no team_dir set). Safe to ignore.
+            println!("[OpenCode] shared_secrets reload skipped: {}", e);
         }
 
         let shared_map = shared_state
@@ -606,10 +695,18 @@ pub async fn start_opencode_inner(
         .spawn()
         .map_err(|e| format!("Failed to spawn OpenCode sidecar: {}", e))?;
 
-    // Store the child process
+    // Store the child process — insert/replace this workspace's instance.
     {
-        let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
-        inner.child_process = Some(child);
+        let mut instances = state.instances.lock().map_err(|e| e.to_string())?;
+        instances.insert(
+            workspace_path.clone(),
+            OpenCodeInner {
+                is_running: false,
+                port,
+                child_process: Some(child),
+                reader_task: None,
+            },
+        );
     }
 
     // Wait for server to be ready — channel carries Ok(()) on success or Err(message) on crash
@@ -673,8 +770,10 @@ pub async fn start_opencode_inner(
 
     // Store the reader task handle for cleanup
     {
-        let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
-        inner.reader_task = Some(reader_handle);
+        let mut instances = state.instances.lock().map_err(|e| e.to_string())?;
+        if let Some(inner) = instances.get_mut(&workspace_path) {
+            inner.reader_task = Some(reader_handle);
+        }
     }
 
     // Wait for ready signal with timeout
@@ -729,12 +828,13 @@ pub async fn start_opencode_inner(
         println!("[OpenCode] Server confirmed running in directory: {}", dir);
     }
 
-    // Update state
+    // Mark instance as ready
     {
-        let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
-        inner.is_running = true;
-        inner.port = port;
-        inner.workspace_path = Some(workspace_path.clone());
+        let mut instances = state.instances.lock().map_err(|e| e.to_string())?;
+        if let Some(inner) = instances.get_mut(&workspace_path) {
+            inner.is_running = true;
+            inner.port = port;
+        }
     }
 
     eprintln!(
@@ -886,6 +986,69 @@ fn ensure_inherent_config(workspace_path: &str) -> Result<(), String> {
             println!("[Config] Added inherent 'chrome-control' MCP config");
         }
 
+        // Re-generate if missing OR if the saved binary path no longer exists
+        let needs_introspect = if let Some(existing) = mcp_obj.get("teamclaw-introspect") {
+            existing
+                .get("command")
+                .and_then(|c| c.as_array())
+                .and_then(|a| a.first())
+                .and_then(|v| v.as_str())
+                .map(|p| !std::path::Path::new(p).exists())
+                .unwrap_or(true)
+        } else {
+            true
+        };
+        if needs_introspect {
+            // Resolve absolute path to the sidecar binary.
+            // In dev: <repo>/src-tauri/binaries/teamclaw-introspect-<triple>
+            // In prod: next to the main executable in the app bundle
+            let triple = get_target_triple();
+            let introspect_bin = std::env::current_exe()
+                .ok()
+                .and_then(|exe| exe.parent().map(|p| p.to_path_buf()))
+                .and_then(|dir| {
+                    // Dev mode: exe is in .cargo-target/debug/, binaries are in src-tauri/binaries/
+                    let dev_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("binaries")
+                        .join(format!("teamclaw-introspect-{}", triple));
+                    if dev_path.exists() {
+                        return Some(dev_path.to_string_lossy().to_string());
+                    }
+                    // Production: sidecar is next to the main exe
+                    // Tauri may strip the triple suffix when bundling
+                    let prod_path_with_triple = dir.join(format!("teamclaw-introspect-{}", triple));
+                    if prod_path_with_triple.exists() {
+                        return Some(prod_path_with_triple.to_string_lossy().to_string());
+                    }
+                    let prod_path = dir.join("teamclaw-introspect");
+                    if prod_path.exists() {
+                        return Some(prod_path.to_string_lossy().to_string());
+                    }
+                    None
+                });
+
+            if let Some(introspect_bin) = introspect_bin {
+                mcp_obj.insert(
+                    "teamclaw-introspect".to_string(),
+                    serde_json::json!({
+                        "type": "local",
+                        "enabled": true,
+                        "command": [
+                            introspect_bin,
+                            "--workspace", workspace_path,
+                            "--api-port", format!("{}", super::introspect_api::INTROSPECT_API_PORT)
+                        ]
+                    }),
+                );
+                changed = true;
+                println!("[Config] Added inherent 'teamclaw-introspect' MCP config");
+            } else {
+                println!(
+                    "[Config] teamclaw-introspect binary not found, skipping MCP registration"
+                );
+            }
+        }
+
         if !mcp_obj.contains_key("autoui") {
             mcp_obj.insert(
                 "autoui".to_string(),
@@ -902,6 +1065,27 @@ fn ensure_inherent_config(workspace_path: &str) -> Result<(), String> {
             );
             changed = true;
             println!("[Config] Added inherent 'autoui' MCP config");
+        } else if let Some(autoui) = mcp_obj.get_mut("autoui").and_then(|v| v.as_object_mut()) {
+            // Migration for users whose autoui `environment` block was stripped by a
+            // previous build: restore the 3 QWEN_* defaults. Only runs when the block
+            // is absent or empty, so partial user customizations are left alone.
+            let needs_restore = autoui
+                .get("environment")
+                .and_then(|v| v.as_object())
+                .map(|env| env.is_empty())
+                .unwrap_or(true);
+            if needs_restore {
+                autoui.insert(
+                    "environment".to_string(),
+                    serde_json::json!({
+                        "QWEN_API_KEY": "${QWEN_API_KEY}",
+                        "QWEN_BASE_URL": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                        "QWEN_MODEL": "qwen3-vl-flash"
+                    }),
+                );
+                changed = true;
+                println!("[Config] Restored default environment block on autoui MCP config");
+            }
         }
     }
 
@@ -927,9 +1111,11 @@ fn ensure_inherent_config(workspace_path: &str) -> Result<(), String> {
         }
     }
 
-    // Provider section is NOT auto-populated.
-    // Team provider is added only when creating/joining a team (via team-mode store).
     // Personal providers are added manually by the user in Settings > LLM.
+    // The `team` provider is reconciled separately by `ensure_team_provider`
+    // against teamclaw-team/_meta/provider.json — that's the only path that
+    // adds OR removes it, so transient frontend reads can't accidentally
+    // delete it on a bad cycle.
 
     if changed {
         let mut new_content = serde_json::to_string_pretty(&config)
@@ -946,6 +1132,492 @@ fn ensure_inherent_config(workspace_path: &str) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Reconcile `provider.team` in opencode.json against teamclaw-team/_meta/provider.json.
+///
+/// Sidecar startup is the only point where disk state is trusted enough to remove:
+/// no in-flight git sync, no concurrent file readers, no UI race. So this is the only
+/// path that DELETES `provider.team`. Runtime sync (frontend file-watcher etc.) only
+/// adds; that protects against a transient `_meta/provider.json` miss yanking the
+/// provider mid-session.
+///
+/// Behavior:
+/// - `_meta/provider.json` exists, `opencode.json` lacks `provider.team` → ADD
+/// - `_meta/provider.json` missing/invalid, `opencode.json` has `provider.team` → REMOVE
+/// - Both present → leave existing entry alone (frontend owns field-level updates,
+///   so we don't strip richer metadata like modalities/limit if the user added it)
+/// - Neither → no-op
+fn ensure_team_provider(workspace_path: &str) -> Result<(), String> {
+    let config_path = super::mcp::get_config_path(workspace_path);
+    let provider_meta_path = std::path::Path::new(workspace_path)
+        .join(super::TEAM_REPO_DIR)
+        .join("_meta")
+        .join("provider.json");
+
+    let mut config: serde_json::Value = if config_path.exists() {
+        let content = std::fs::read_to_string(&config_path)
+            .map_err(|e| format!("Failed to read opencode.json: {}", e))?;
+        serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse opencode.json: {}", e))?
+    } else {
+        serde_json::json!({ "$schema": "https://opencode.ai/config.json" })
+    };
+    let obj = config
+        .as_object_mut()
+        .ok_or("opencode.json root is not an object")?;
+
+    let provider_meta: Option<serde_json::Value> = if provider_meta_path.exists() {
+        std::fs::read_to_string(&provider_meta_path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .filter(|v| v.get("provider").and_then(|p| p.get("baseURL")).is_some())
+    } else {
+        None
+    };
+
+    let has_team_in_opencode = obj
+        .get("provider")
+        .and_then(|p| p.as_object())
+        .map(|p| p.contains_key("team"))
+        .unwrap_or(false);
+
+    let mut changed = false;
+
+    match (provider_meta, has_team_in_opencode) {
+        // ADD: meta exists, opencode.json lacks the entry
+        (Some(meta), false) => {
+            let p = meta.get("provider").ok_or("provider field missing")?;
+            let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("Team");
+            let base_url = p
+                .get("baseURL")
+                .and_then(|v| v.as_str())
+                .ok_or("provider.baseURL missing")?;
+            let api_key = p
+                .get("apiKey")
+                .and_then(|v| v.as_str())
+                .unwrap_or("${tc_api_key}");
+            let models_in = p
+                .get("models")
+                .and_then(|v| v.as_array())
+                .ok_or("provider.models missing or not an array")?;
+
+            let mut models_out = serde_json::Map::new();
+            for m in models_in {
+                let id = match m.get("id").and_then(|v| v.as_str()) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                let mname = m.get("name").and_then(|v| v.as_str()).unwrap_or(id);
+                models_out.insert(
+                    id.to_string(),
+                    serde_json::json!({
+                        "name": mname,
+                        "limit": { "context": 256000, "output": 16000 }
+                    }),
+                );
+            }
+
+            let providers = obj
+                .entry("provider")
+                .or_insert_with(|| serde_json::json!({}))
+                .as_object_mut()
+                .ok_or("provider is not an object")?;
+            providers.insert(
+                "team".to_string(),
+                serde_json::json!({
+                    "npm": "@ai-sdk/openai-compatible",
+                    "name": name,
+                    "options": { "baseURL": base_url, "apiKey": api_key },
+                    "models": models_out,
+                }),
+            );
+            changed = true;
+            println!(
+                "[Config] Added provider.team to opencode.json (synced from {})",
+                provider_meta_path.display()
+            );
+        }
+        // REMOVE: meta missing, opencode.json still has stale entry
+        (None, true) => {
+            if let Some(providers) = obj.get_mut("provider").and_then(|p| p.as_object_mut()) {
+                providers.remove("team");
+                if providers.is_empty() {
+                    obj.remove("provider");
+                }
+                changed = true;
+                println!("[Config] Removed stale provider.team from opencode.json");
+            }
+        }
+        // Both present: leave alone. Frontend owns field-level updates.
+        // Neither: no-op.
+        _ => {}
+    }
+
+    if changed {
+        let mut new_content = serde_json::to_string_pretty(&config)
+            .map_err(|e| format!("Failed to serialize opencode.json: {}", e))?;
+        if !new_content.ends_with('\n') {
+            new_content.push('\n');
+        }
+        std::fs::write(&config_path, &new_content)
+            .map_err(|e| format!("Failed to write opencode.json: {}", e))?;
+    }
+
+    Ok(())
+}
+
+fn refresh_npm_plugins_if_needed(workspace_path: &str) -> Result<(), String> {
+    let state_path = plugin_update_state_path(workspace_path);
+    let ttl = std::time::Duration::from_secs(PLUGIN_UPDATE_TTL_SECS);
+    if !should_check_plugin_updates(&state_path, ttl) {
+        return Ok(());
+    }
+
+    let config_path = super::mcp::get_config_path(workspace_path);
+    if !config_path.exists() {
+        write_plugin_update_state(&state_path)?;
+        return Ok(());
+    }
+
+    let content = std::fs::read_to_string(&config_path)
+        .map_err(|e| format!("Failed to read opencode.json for plugin refresh: {}", e))?;
+    let config: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse opencode.json for plugin refresh: {}", e))?;
+
+    let plugin_specs = config
+        .get("plugin")
+        .and_then(|value| value.as_array())
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| entry.as_str())
+                .filter_map(parse_plugin_update_target)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if plugin_specs.is_empty() {
+        write_plugin_update_state(&state_path)?;
+        return Ok(());
+    }
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap_or_else(|_| reqwest::blocking::Client::new());
+
+    for plugin in plugin_specs {
+        let latest_version = match fetch_latest_npm_version(&client, &plugin.package_name) {
+            Ok(version) => version,
+            Err(err) => {
+                eprintln!(
+                    "[OpenCode] Plugin update check skipped for {}: {}",
+                    plugin.spec, err
+                );
+                continue;
+            }
+        };
+
+        let Some(latest_version) = latest_version else {
+            continue;
+        };
+
+        let cache_dir = plugin_cache_dir(workspace_path, &plugin.spec);
+        let Some(local_version) = read_installed_plugin_version(&cache_dir, &plugin.package_name)?
+        else {
+            continue;
+        };
+
+        if !is_remote_version_newer(&local_version, &latest_version) {
+            continue;
+        }
+
+        if cache_dir.exists() {
+            std::fs::remove_dir_all(&cache_dir).map_err(|e| {
+                format!(
+                    "Failed to remove plugin cache {}: {}",
+                    cache_dir.display(),
+                    e
+                )
+            })?;
+            println!(
+                "[OpenCode] Removed stale plugin cache for {} ({} -> {})",
+                plugin.spec, local_version, latest_version
+            );
+        }
+    }
+
+    write_plugin_update_state(&state_path)?;
+    Ok(())
+}
+
+/// Mirror OAuth credentials from the user's global opencode auth.json into the
+/// workspace's isolated auth.json. Without this, OAuth-based providers
+/// (Anthropic, OpenAI sign-in, Copilot, etc.) and plugins like
+/// opencode-claude-auth that branch on `auth.type === "oauth"` see no
+/// credentials in teamclaw's sidecar because XDG_DATA_HOME is redirected to
+/// `<workspace>/.opencode/data`.
+///
+/// Only OAuth entries are copied. API-key entries stay per-workspace.
+/// Existing workspace entries are never overwritten.
+fn sync_global_auth_to_workspace(workspace_path: &str) -> Result<(), String> {
+    let Some(home) = dirs::home_dir() else {
+        return Ok(());
+    };
+    let global_auth_path = home.join(".local/share/opencode/auth.json");
+    if !global_auth_path.exists() {
+        return Ok(());
+    }
+
+    let global_content = std::fs::read_to_string(&global_auth_path)
+        .map_err(|e| format!("read global auth.json: {}", e))?;
+    let global: serde_json::Value = serde_json::from_str(&global_content)
+        .map_err(|e| format!("parse global auth.json: {}", e))?;
+    let Some(global_obj) = global.as_object() else {
+        return Ok(());
+    };
+
+    let workspace_auth_path = std::path::PathBuf::from(workspace_path)
+        .join(".opencode")
+        .join("data")
+        .join("opencode")
+        .join("auth.json");
+    if let Some(parent) = workspace_auth_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create workspace auth dir: {}", e))?;
+    }
+
+    let workspace_content =
+        std::fs::read_to_string(&workspace_auth_path).unwrap_or_else(|_| "{}".to_string());
+    let mut workspace_value: serde_json::Value =
+        serde_json::from_str(&workspace_content).unwrap_or_else(|_| serde_json::json!({}));
+    let workspace_obj = workspace_value
+        .as_object_mut()
+        .ok_or_else(|| "workspace auth.json root is not an object".to_string())?;
+
+    let mut added = Vec::new();
+    for (provider_id, entry) in global_obj {
+        if entry.get("type").and_then(|t| t.as_str()) != Some("oauth") {
+            continue;
+        }
+        if workspace_obj.contains_key(provider_id) {
+            continue;
+        }
+        workspace_obj.insert(provider_id.clone(), entry.clone());
+        added.push(provider_id.clone());
+    }
+
+    if added.is_empty() {
+        return Ok(());
+    }
+
+    let new_content = serde_json::to_string_pretty(&workspace_value)
+        .map_err(|e| format!("serialize workspace auth.json: {}", e))?;
+    std::fs::write(&workspace_auth_path, new_content)
+        .map_err(|e| format!("write workspace auth.json: {}", e))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ =
+            std::fs::set_permissions(&workspace_auth_path, std::fs::Permissions::from_mode(0o600));
+    }
+
+    println!(
+        "[OpenCode] Synced OAuth providers from global auth.json: {:?}",
+        added
+    );
+    Ok(())
+}
+
+fn parse_plugin_update_target(spec: &str) -> Option<PluginUpdateTarget> {
+    let spec = spec.trim();
+    if spec.is_empty()
+        || spec.starts_with("git+")
+        || spec.starts_with("github:")
+        || spec.starts_with("file:")
+        || spec.starts_with("link:")
+        || spec.starts_with("workspace:")
+        || spec.contains("://")
+    {
+        return None;
+    }
+
+    let (package_name, version) = split_npm_package_spec(spec)?;
+    let auto_update = version.is_none() || version == Some("latest");
+    if !auto_update {
+        return None;
+    }
+
+    Some(PluginUpdateTarget {
+        spec: spec.to_string(),
+        package_name: package_name.to_string(),
+        auto_update,
+    })
+}
+
+fn split_npm_package_spec(spec: &str) -> Option<(&str, Option<&str>)> {
+    if spec.is_empty() {
+        return None;
+    }
+
+    if let Some(rest) = spec.strip_prefix('@') {
+        let slash = rest.find('/')?;
+        let after_scope = slash + 2;
+        if after_scope >= spec.len() {
+            return None;
+        }
+        let version_sep = spec[after_scope..].rfind('@').map(|idx| idx + after_scope);
+        return match version_sep {
+            Some(idx) => Some((&spec[..idx], Some(&spec[idx + 1..]))),
+            None => Some((spec, None)),
+        };
+    }
+
+    match spec.rfind('@') {
+        Some(idx) => Some((&spec[..idx], Some(&spec[idx + 1..]))),
+        None => Some((spec, None)),
+    }
+}
+
+fn fetch_latest_npm_version(
+    client: &reqwest::blocking::Client,
+    package_name: &str,
+) -> Result<Option<String>, String> {
+    let package_url = format!(
+        "https://registry.npmjs.org/{}",
+        urlencoding::encode(package_name)
+    );
+    let response = client
+        .get(&package_url)
+        .send()
+        .map_err(|e| format!("registry request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("registry returned status {}", response.status()));
+    }
+
+    let body: serde_json::Value = response
+        .json()
+        .map_err(|e| format!("registry response parse failed: {}", e))?;
+
+    Ok(body
+        .get("dist-tags")
+        .and_then(|tags| tags.get("latest"))
+        .and_then(|latest| latest.as_str())
+        .map(str::to_string))
+}
+
+fn plugin_update_state_path(workspace_path: &str) -> PathBuf {
+    Path::new(workspace_path)
+        .join(".opencode")
+        .join("state")
+        .join("plugin-update-check.json")
+}
+
+fn should_check_plugin_updates(state_path: &Path, ttl: std::time::Duration) -> bool {
+    let Ok(content) = std::fs::read_to_string(state_path) else {
+        return true;
+    };
+    let Ok(state) = serde_json::from_str::<PluginUpdateState>(&content) else {
+        return true;
+    };
+
+    current_time_ms().saturating_sub(state.last_checked_at_ms) >= ttl.as_millis() as u64
+}
+
+fn write_plugin_update_state(state_path: &Path) -> Result<(), String> {
+    if let Some(parent) = state_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            format!(
+                "Failed to create plugin update state directory {}: {}",
+                parent.display(),
+                e
+            )
+        })?;
+    }
+
+    let content = serde_json::to_string_pretty(&PluginUpdateState {
+        last_checked_at_ms: current_time_ms(),
+    })
+    .map_err(|e| format!("Failed to serialize plugin update state: {}", e))?;
+
+    std::fs::write(state_path, content).map_err(|e| {
+        format!(
+            "Failed to write plugin update state {}: {}",
+            state_path.display(),
+            e
+        )
+    })
+}
+
+fn plugin_cache_dir(workspace_path: &str, spec: &str) -> PathBuf {
+    Path::new(workspace_path)
+        .join(".opencode")
+        .join("cache")
+        .join("opencode")
+        .join("packages")
+        .join(normalized_plugin_cache_key(spec))
+}
+
+fn normalized_plugin_cache_key(spec: &str) -> String {
+    let Some((_, version)) = split_npm_package_spec(spec) else {
+        return spec.to_string();
+    };
+    if version.is_none() {
+        return format!("{}@latest", spec);
+    }
+    spec.to_string()
+}
+
+fn read_installed_plugin_version(
+    cache_dir: &Path,
+    package_name: &str,
+) -> Result<Option<String>, String> {
+    let package_json_path = cache_dir
+        .join("node_modules")
+        .join(package_name)
+        .join("package.json");
+    if !package_json_path.exists() {
+        return Ok(None);
+    }
+
+    let content = std::fs::read_to_string(&package_json_path).map_err(|e| {
+        format!(
+            "Failed to read plugin package.json {}: {}",
+            package_json_path.display(),
+            e
+        )
+    })?;
+    let package_json: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
+        format!(
+            "Failed to parse plugin package.json {}: {}",
+            package_json_path.display(),
+            e
+        )
+    })?;
+
+    Ok(package_json
+        .get("version")
+        .and_then(|value| value.as_str())
+        .map(str::to_string))
+}
+
+fn is_remote_version_newer(local_version: &str, remote_version: &str) -> bool {
+    match (
+        semver::Version::parse(local_version),
+        semver::Version::parse(remote_version),
+    ) {
+        (Ok(local), Ok(remote)) => remote > local,
+        _ => local_version != remote_version,
+    }
+}
+
+fn current_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 /// Inherent skill definition: a skill that TeamClaw auto-provisions in every workspace.
@@ -1189,6 +1861,22 @@ fn resolve_sidecar_binary_paths(workspace_path: &str) -> Result<(), String> {
                     if let Some(arr) = command.as_array_mut() {
                         for item in arr.iter_mut() {
                             if let Some(cmd_str) = item.as_str() {
+                                // Fix legacy relative paths like ./binaries/teamclaw-introspect
+                                if cmd_str.starts_with("./binaries/teamclaw-introspect") {
+                                    let abs_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                                        .join("binaries")
+                                        .join(format!("teamclaw-introspect-{}", target_triple));
+                                    if abs_path.exists() {
+                                        let new_cmd = abs_path.to_string_lossy().to_string();
+                                        println!(
+                                            "[OpenCode] Resolved MCP '{}' binary: {} -> {}",
+                                            name, cmd_str, new_cmd
+                                        );
+                                        *item = serde_json::Value::String(new_cmd);
+                                        modified = true;
+                                    }
+                                    continue;
+                                }
                                 // Only touch paths that reference our bundled binaries
                                 if !cmd_str.contains("src-tauri/binaries/") {
                                     continue;
@@ -1229,32 +1917,79 @@ fn resolve_sidecar_binary_paths(workspace_path: &str) -> Result<(), String> {
 
 // ─── Secret / env-var helpers for MCP config ────────────────────────────
 //
-// teamclaw stores API keys in the OS credential store (macOS Keychain /
-// Windows Credential Manager / Linux Secret Service).  opencode.json
+// teamclaw stores personal API keys in a local encrypted secret blob.
+// Legacy keychain data is consulted only as first-read migration input.
+// opencode.json
 // references them via ${KEY_NAME}.  OpenCode passes environment values
 // literally to MCP server processes, so we must:
-//   1. Read secrets from the keyring
+//   1. Read personal secrets from the local encrypted store
 //   2. Write resolved values into opencode.json before OpenCode starts
 //   3. Restore the ${KEY} references after all MCP servers have connected
 
-/// Read all personal env vars from the single keychain blob.
+#[cfg(test)]
+fn load_local_personal_secrets_from_blob<F>(
+    paths: &super::local_secret_store::SecretStorePaths,
+    legacy_reader: F,
+) -> Result<Vec<(String, String)>, String>
+where
+    F: FnOnce() -> Result<Option<serde_json::Map<String, serde_json::Value>>, String>,
+{
+    let blob = super::local_secret_store::read_or_migrate_secret_blob(paths, legacy_reader)?;
+    Ok(blob
+        .into_iter()
+        .filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string())))
+        .collect())
+}
+
+fn load_local_personal_secrets_from_paths(
+    workspace_path: &str,
+    paths: &super::local_secret_store::SecretStorePaths,
+) -> Result<(Vec<(String, String)>, bool), String> {
+    let (blob, retry_needed) =
+        super::env_vars::read_personal_secret_blob_for_startup_from_paths(workspace_path, paths)?;
+    Ok((
+        blob.into_iter()
+            .filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string())))
+            .collect(),
+        retry_needed,
+    ))
+}
+
+/// Read all personal env vars from the local encrypted secret blob.
 /// Returns `(secrets, failed)` — failed is always empty on success, or contains
 /// a diagnostic sentinel if the blob itself cannot be read.
-fn read_keyring_secrets(workspace_path: &str) -> (Vec<(String, String)>, Vec<String>) {
-    match super::env_vars::read_env_blob(workspace_path) {
-        Ok(blob) => {
-            let secrets: Vec<(String, String)> = blob
-                .into_iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string())))
-                .collect();
-            println!(
-                "[OpenCode] Loaded {} secrets from keychain blob",
-                secrets.len()
+fn load_local_personal_secrets(workspace_path: &str) -> (Vec<(String, String)>, Vec<String>) {
+    let paths = match super::local_secret_store::SecretStorePaths::for_home_dir() {
+        Ok(paths) => paths,
+        Err(e) => {
+            eprintln!(
+                "[OpenCode] Failed to resolve local encrypted secret store path: {}",
+                e
             );
-            (secrets, Vec::new())
+            return (Vec::new(), vec!["__blob__".to_string()]);
+        }
+    };
+
+    match load_local_personal_secrets_from_paths(workspace_path, &paths) {
+        Ok((blob, retry_needed)) => {
+            println!(
+                "[OpenCode] Loaded {} personal secrets from local encrypted store",
+                blob.len()
+            );
+            (
+                blob,
+                if retry_needed {
+                    vec!["__blob__".to_string()]
+                } else {
+                    Vec::new()
+                },
+            )
         }
         Err(e) => {
-            eprintln!("[OpenCode] Failed to read keychain blob: {}", e);
+            eprintln!(
+                "[OpenCode] Failed to read local encrypted secret blob: {}",
+                e
+            );
             (Vec::new(), vec!["__blob__".to_string()])
         }
     }
@@ -1438,7 +2173,7 @@ async fn kill_process_on_port(port: u16) -> bool {
 async fn kill_process_on_port_windows(port: u16) -> bool {
     use std::process::Command;
 
-    let output = Command::new("netstat").args(["-ano"]).output();
+    let output = Command::new("netstat").no_window().args(["-ano"]).output();
 
     let Ok(output) = output else {
         println!("[OpenCode] Failed to run netstat on port {}", port);
@@ -1470,7 +2205,10 @@ async fn kill_process_on_port_windows(port: u16) -> bool {
             continue;
         }
         println!("[OpenCode] Killing zombie process {} on port {}", pid, port);
-        let _ = Command::new("taskkill").args(["/PID", pid, "/F"]).output();
+        let _ = Command::new("taskkill")
+            .no_window()
+            .args(["/PID", pid, "/F"])
+            .output();
         killed_any = true;
     }
 
@@ -1595,71 +2333,222 @@ async fn get_server_paths(port: u16) -> (Option<String>, Option<String>) {
     (None, None)
 }
 
-/// Stop OpenCode sidecar (production) or clear running state (dev). Shared by the
-/// `stop_opencode` command and application exit (`RunEvent::Exit`).
-pub async fn shutdown_opencode(state: &OpenCodeState) -> Result<(), String> {
-    let (is_dev_mode, port) = {
-        let inner = state.inner.lock().map_err(|e| e.to_string())?;
-        (inner.is_dev_mode, inner.port)
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::local_secret_store::{self, SecretStorePaths};
+    use std::path::Path;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Mutex, OnceLock};
+    use tempfile::tempdir;
+
+    fn home_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct HomeGuard {
+        original_home: Option<std::ffi::OsString>,
+    }
+
+    impl HomeGuard {
+        fn set(path: &Path) -> Self {
+            let original_home = std::env::var_os("HOME");
+            std::env::set_var("HOME", path);
+            Self { original_home }
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match &self.original_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    #[test]
+    fn load_local_personal_secrets_prefers_existing_encrypted_blob_without_legacy_read() {
+        let _home_guard = home_lock().lock().unwrap();
+        let home_dir = tempdir().unwrap();
+        let _home = HomeGuard::set(home_dir.path());
+        let paths = SecretStorePaths::for_home_dir().unwrap();
+
+        let mut map = serde_json::Map::new();
+        map.insert(
+            "OPENAI_API_KEY".into(),
+            serde_json::Value::String("local-secret".into()),
+        );
+        map.insert("IGNORED".into(), serde_json::json!(123));
+        local_secret_store::write_secret_blob(&paths, &map).unwrap();
+
+        let legacy_reader_called = AtomicBool::new(false);
+        let secrets = load_local_personal_secrets_from_blob(&paths, || {
+            legacy_reader_called.store(true, Ordering::SeqCst);
+            Ok(Some(serde_json::Map::new()))
+        })
+        .unwrap();
+
+        assert_eq!(
+            secrets,
+            vec![("OPENAI_API_KEY".to_string(), "local-secret".to_string())]
+        );
+        assert!(!legacy_reader_called.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn load_local_personal_secrets_migrates_from_legacy_reader_not_read_env_blob() {
+        let _home_guard = home_lock().lock().unwrap();
+        let home_dir = tempdir().unwrap();
+        let _home = HomeGuard::set(home_dir.path());
+        let workspace_dir = tempdir().unwrap();
+        let workspace_path = workspace_dir.path().to_string_lossy().to_string();
+
+        let home_paths = SecretStorePaths::for_home_dir().unwrap();
+        let mut home_map = serde_json::Map::new();
+        home_map.insert(
+            "OPENAI_API_KEY".into(),
+            serde_json::Value::String("from-read-env-blob".into()),
+        );
+        local_secret_store::write_secret_blob(&home_paths, &home_map).unwrap();
+
+        let legacy_blob_dir = home_dir.path().join(concat!(".", env!("APP_SHORT_NAME")));
+        std::fs::create_dir_all(&legacy_blob_dir).unwrap();
+        let mut legacy_map = serde_json::Map::new();
+        legacy_map.insert(
+            "OPENAI_API_KEY".into(),
+            serde_json::Value::String("from-legacy-reader".into()),
+        );
+        std::fs::write(
+            legacy_blob_dir.join("env-blob.json"),
+            serde_json::to_vec(&legacy_map).unwrap(),
+        )
+        .unwrap();
+
+        let custom_store_dir = tempdir().unwrap();
+        let custom_paths = SecretStorePaths::for_base_dir(custom_store_dir.path().join("secrets"));
+
+        let (secrets, retry_needed) =
+            load_local_personal_secrets_from_paths(&workspace_path, &custom_paths).unwrap();
+
+        assert_eq!(
+            secrets,
+            vec![(
+                "OPENAI_API_KEY".to_string(),
+                "from-legacy-reader".to_string()
+            )]
+        );
+        assert!(!retry_needed);
+
+        let migrated = local_secret_store::read_secret_blob(&custom_paths).unwrap();
+        assert_eq!(
+            migrated.get("OPENAI_API_KEY").and_then(|v| v.as_str()),
+            Some("from-legacy-reader")
+        );
+    }
+}
+
+/// Stop OpenCode sidecar(s) (production) or clear running state (dev).
+///
+/// `workspace_path = None` shuts down ALL instances (used by `RunEvent::Exit`
+/// and the back-compat `stop_opencode` command). `Some(ws)` shuts down only
+/// the named instance — Phase 2 will use this for per-window cleanup.
+pub async fn shutdown_opencode(
+    state: &OpenCodeState,
+    workspace_path: Option<&str>,
+) -> Result<(), String> {
+    let is_dev_mode = state.is_dev_mode;
+
+    // Snapshot the targets we need to kill (workspace_path, port, child, reader_handle).
+    // We remove entries from the map up-front so any concurrent caller sees a clean slate.
+    let targets: Vec<(
+        String,
+        u16,
+        Option<CommandChild>,
+        Option<tauri::async_runtime::JoinHandle<()>>,
+    )> = {
+        let mut instances = state.instances.lock().map_err(|e| e.to_string())?;
+        let keys: Vec<String> = match workspace_path {
+            Some(ws) => {
+                if instances.contains_key(ws) {
+                    vec![ws.to_string()]
+                } else {
+                    return Ok(());
+                }
+            }
+            None => instances.keys().cloned().collect(),
+        };
+        keys.into_iter()
+            .filter_map(|k| {
+                instances.remove(&k).map(|mut inner| {
+                    let child = inner.child_process.take();
+                    let reader = inner.reader_task.take();
+                    (k, inner.port, child, reader)
+                })
+            })
+            .collect()
     };
 
-    // In dev mode, just update state (don't try to kill external process)
-    if is_dev_mode {
-        let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
-        inner.is_running = false;
+    if targets.is_empty() {
         return Ok(());
     }
 
-    // Production mode: kill sidecar and abort reader task
-    {
-        let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
-        if let Some(child) = inner.child_process.take() {
-            child
-                .kill()
-                .map_err(|e| format!("Failed to stop OpenCode: {}", e))?;
+    for (ws, port, child, reader) in targets {
+        if is_dev_mode {
+            // External server — don't kill, just clear state (already removed above).
+            println!("[OpenCode] Dev mode: cleared state for {}", ws);
+            continue;
         }
-        if let Some(handle) = inner.reader_task.take() {
+
+        if let Some(child) = child {
+            if let Err(e) = child.kill() {
+                eprintln!("[OpenCode] Failed to kill sidecar for {}: {}", ws, e);
+            }
+        }
+        if let Some(handle) = reader {
             handle.abort();
         }
-    }
 
-    // Wait for port to be released with exponential backoff
-    println!("[OpenCode] Waiting for graceful shutdown...");
-    let start_time = std::time::Instant::now();
-    const MAX_WAIT_TIME: std::time::Duration = std::time::Duration::from_secs(5);
-    let mut delay = std::time::Duration::from_millis(100);
+        // Wait for port to be released with exponential backoff
+        println!(
+            "[OpenCode] Waiting for graceful shutdown of {} (port {})...",
+            ws, port
+        );
+        let start_time = std::time::Instant::now();
+        const MAX_WAIT_TIME: std::time::Duration = std::time::Duration::from_secs(5);
+        let mut delay = std::time::Duration::from_millis(100);
 
-    loop {
-        if !is_port_in_use(port).await {
-            println!(
-                "[OpenCode] Shutdown complete after {:.1}s",
-                start_time.elapsed().as_secs_f32()
-            );
-            break;
+        loop {
+            if !is_port_in_use(port).await {
+                println!(
+                    "[OpenCode] Shutdown of {} complete after {:.1}s",
+                    ws,
+                    start_time.elapsed().as_secs_f32()
+                );
+                break;
+            }
+
+            if start_time.elapsed() >= MAX_WAIT_TIME {
+                println!(
+                    "[OpenCode] Warning: process for {} did not release port {} after 5s",
+                    ws, port
+                );
+                break;
+            }
+
+            tokio::time::sleep(delay).await;
+            delay = std::cmp::min(delay * 2, std::time::Duration::from_secs(1));
         }
-
-        if start_time.elapsed() >= MAX_WAIT_TIME {
-            println!("[OpenCode] Warning: Process did not release port after 5s");
-            break;
-        }
-
-        tokio::time::sleep(delay).await;
-        delay = std::cmp::min(delay * 2, std::time::Duration::from_secs(1));
-    }
-
-    // Update state
-    {
-        let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
-        inner.is_running = false;
     }
 
     Ok(())
 }
 
-/// Stop OpenCode server
+/// Stop OpenCode server (back-compat: shuts down all instances).
 #[tauri::command]
 pub async fn stop_opencode(state: State<'_, OpenCodeState>) -> Result<(), String> {
-    shutdown_opencode(&state).await
+    shutdown_opencode(&state, None).await
 }
 
 // ─── OpenCode DB allowlist commands ──────────────────────────────────
@@ -1697,6 +2586,7 @@ pub async fn get_opencode_project_id(workspace_path: String) -> Result<String, S
     let normalized = workspace_path.trim_end_matches('/');
 
     let output = std::process::Command::new("sqlite3")
+        .no_window()
         .args([&db_path, "-json", "SELECT id, worktree FROM project;"])
         .output()
         .map_err(|e| format!("Failed to run sqlite3: {}", e))?;
@@ -1755,6 +2645,7 @@ pub async fn read_opencode_allowlist(workspace_path: String) -> Result<Vec<Allow
     let db_path = get_opencode_db_path(&workspace_path)?;
 
     let output = std::process::Command::new("sqlite3")
+        .no_window()
         .args([
             &db_path,
             "-json",
@@ -1817,6 +2708,7 @@ pub async fn write_opencode_allowlist(
 
     if rules.is_empty() {
         let output = std::process::Command::new("sqlite3")
+            .no_window()
             .args([
                 &db_path,
                 &format!(
@@ -1844,6 +2736,7 @@ pub async fn write_opencode_allowlist(
         );
 
         let output = std::process::Command::new("sqlite3")
+            .no_window()
             .args([&db_path, &sql])
             .output()
             .map_err(|e| format!("Failed to run sqlite3: {}", e))?;
@@ -1902,17 +2795,46 @@ fn write_last_workspace(workspace_path: &str) {
     );
 }
 
-/// Get OpenCode server status
+/// Remove the persisted last-workspace so the next launch shows the workspace picker.
+#[tauri::command]
+pub fn clear_last_workspace() {
+    let path = last_workspace_path();
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Get OpenCode server status.
+///
+/// Single-instance flow: returns the lone instance's status. Zero instances:
+/// returns a placeholder `is_running: false` on `DEFAULT_PORT` so the frontend
+/// can boot before a workspace is selected. Two-or-more instances: error
+/// (Phase 2 will add a workspace-aware variant).
 #[tauri::command]
 pub async fn get_opencode_status(
     state: State<'_, OpenCodeState>,
 ) -> Result<OpenCodeStatus, String> {
-    let inner = state.inner.lock().map_err(|e| e.to_string())?;
-    Ok(OpenCodeStatus {
-        is_running: inner.is_running,
-        port: inner.port,
-        url: format!("http://127.0.0.1:{}", inner.port),
-        is_dev_mode: inner.is_dev_mode,
-        workspace_path: inner.workspace_path.clone(),
-    })
+    let is_dev_mode = state.is_dev_mode;
+    let instances = state.instances.lock().map_err(|e| e.to_string())?;
+    match instances.len() {
+        0 => Ok(OpenCodeStatus {
+            is_running: false,
+            port: DEFAULT_PORT,
+            url: format!("http://127.0.0.1:{}", DEFAULT_PORT),
+            is_dev_mode,
+            workspace_path: None,
+        }),
+        1 => {
+            let (ws, inner) = instances.iter().next().unwrap();
+            Ok(OpenCodeStatus {
+                is_running: inner.is_running,
+                port: inner.port,
+                url: format!("http://127.0.0.1:{}", inner.port),
+                is_dev_mode,
+                workspace_path: Some(ws.clone()),
+            })
+        }
+        n => Err(format!(
+            "{} OpenCode instances active; use a workspace-aware status query",
+            n
+        )),
+    }
 }

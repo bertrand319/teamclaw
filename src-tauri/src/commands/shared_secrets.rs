@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use super::shared_secrets_crypto::{
     decrypt_secret, derive_key, encrypt_secret, EncryptedEnvelope, SecretEntry, SecretMeta,
@@ -67,8 +67,15 @@ pub fn validate_key_id(key_id: &str) -> Result<(), String> {
 // File I/O helpers
 // ---------------------------------------------------------------------------
 
-/// Returns the `_secrets/` directory inside `team_dir`, creating it if needed.
+/// Returns the `_secrets/` directory inside an existing `team_dir`, creating the
+/// subdirectory if needed.
 pub fn secrets_dir(team_dir: &Path) -> Result<PathBuf, String> {
+    if !team_dir.exists() {
+        return Err(format!(
+            "secrets_dir: team dir does not exist: {}",
+            team_dir.display()
+        ));
+    }
     let dir = team_dir.join(SECRETS_DIR);
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("secrets_dir: failed to create {}: {}", dir.display(), e))?;
@@ -153,7 +160,20 @@ pub fn load_all_secrets(state: &SharedSecretsState) -> Result<(), String> {
         dk.ok_or_else(|| "load_all_secrets: derived_key not set".to_string())?
     };
 
-    let dir = secrets_dir(&team_dir)?;
+    let dir = team_dir.join(SECRETS_DIR);
+
+    if !dir.exists() {
+        let mut secrets = state
+            .secrets
+            .lock()
+            .map_err(|e| format!("load_all_secrets: lock secrets: {e}"))?;
+        secrets.clear();
+        log::info!(
+            "shared_secrets: no secrets directory at {}, treating as empty",
+            dir.display()
+        );
+        return Ok(());
+    }
 
     let mut new_map: HashMap<String, SecretEntry> = HashMap::new();
 
@@ -208,10 +228,7 @@ pub fn load_all_secrets(state: &SharedSecretsState) -> Result<(), String> {
                 new_map.insert(secret.key_id.clone(), secret);
             }
             Err(e) => {
-                log::warn!(
-                    "shared_secrets: failed to decrypt {}: {e}",
-                    path.display()
-                );
+                log::warn!("shared_secrets: failed to decrypt {}: {e}", path.display());
             }
         }
     }
@@ -231,6 +248,57 @@ pub fn get_secret_value(state: &SharedSecretsState, key_id: &str) -> Option<Stri
     secrets.get(key_id).map(|e| e.key.clone())
 }
 
+/// Try to initialize shared_secrets from the workspace's team config.
+/// Supports both `oss.teamId` (OSS teams) and `team.teamId` (managed-Git teams).
+/// Fast-path returns Ok() immediately when already initialized.
+///
+/// Called by `shared_secret_set` / `shared_secret_delete` so a user who joined
+/// a team but hasn't yet mounted the TeamGitConfig panel (which eagerly inits
+/// from the frontend) can still save/delete shared secrets.
+pub fn try_lazy_init_from_workspace(
+    state: &SharedSecretsState,
+    workspace_path: &str,
+) -> Result<(), String> {
+    // Fast path: already initialized.
+    {
+        let dk = state
+            .derived_key
+            .lock()
+            .map_err(|e| format!("try_lazy_init: lock derived_key: {e}"))?;
+        if dk.is_some() {
+            return Ok(());
+        }
+    }
+
+    let config_path = format!(
+        "{}/{}/{}",
+        workspace_path,
+        super::TEAMCLAW_DIR,
+        super::CONFIG_FILE_NAME
+    );
+    let content = std::fs::read_to_string(&config_path)
+        .map_err(|_| "No team configured for this workspace".to_string())?;
+    let json: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse teamclaw.json: {e}"))?;
+
+    // Pick the first enabled team section that carries a `teamId`.
+    // Both OSS and Git team configs use camelCase `teamId` in JSON.
+    let team_id = ["oss", "team"]
+        .iter()
+        .find_map(|section| {
+            let obj = json.get(*section)?.as_object()?;
+            if obj.get("enabled").and_then(|v| v.as_bool()) != Some(true) {
+                return None;
+            }
+            obj.get("teamId").and_then(|v| v.as_str()).map(String::from)
+        })
+        .ok_or_else(|| "No team configured for this workspace".to_string())?;
+
+    let team_secret = super::oss_sync::load_team_secret(workspace_path, &team_id)?;
+    let team_dir = std::path::Path::new(workspace_path).join(super::TEAM_REPO_DIR);
+    init_shared_secrets(state, &team_secret, &team_dir)
+}
+
 // ---------------------------------------------------------------------------
 // Tauri commands
 // ---------------------------------------------------------------------------
@@ -247,6 +315,17 @@ pub async fn shared_secret_set(
     node_id: String,
 ) -> Result<(), String> {
     validate_key_id(&key_id)?;
+
+    // Lazy-init from workspace config when not yet initialized (e.g. Git teams
+    // whose TeamGitConfig panel hasn't been mounted yet this session).
+    if let Some(opencode_state) = app_handle.try_state::<super::opencode::OpenCodeState>() {
+        let workspace_path = super::opencode::current_workspace_path(&opencode_state).ok();
+        if let Some(wp) = workspace_path {
+            if let Err(e) = try_lazy_init_from_workspace(&state, &wp) {
+                log::debug!("shared_secret_set: lazy init skipped: {e}");
+            }
+        }
+    }
 
     let team_dir = {
         let td = state
@@ -314,6 +393,16 @@ pub async fn shared_secret_delete(
 ) -> Result<(), String> {
     validate_key_id(&key_id)?;
 
+    // Same lazy-init as `shared_secret_set` — needed before the team_dir check below.
+    if let Some(opencode_state) = app_handle.try_state::<super::opencode::OpenCodeState>() {
+        let workspace_path = super::opencode::current_workspace_path(&opencode_state).ok();
+        if let Some(wp) = workspace_path {
+            if let Err(e) = try_lazy_init_from_workspace(&state, &wp) {
+                log::debug!("shared_secret_delete: lazy init skipped: {e}");
+            }
+        }
+    }
+
     // Check permission: Owner can delete any; others can only delete their own
     {
         let secrets = state
@@ -364,6 +453,24 @@ pub async fn shared_secret_list(
         .map_err(|e| format!("shared_secret_list: lock secrets: {e}"))?;
 
     let mut list: Vec<SecretMeta> = secrets.values().map(SecretMeta::from).collect();
-    list.sort_by(|a, b| a.key_id.cmp(&b.key_id));
+    list.sort_by_key(|secret| secret.key_id.clone());
     Ok(list)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn init_shared_secrets_does_not_create_missing_team_dir() {
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let team_dir = workspace_dir.path().join(crate::commands::TEAM_REPO_DIR);
+        let state = SharedSecretsState::default();
+        let team_secret = "00".repeat(32);
+
+        let result = init_shared_secrets(&state, &team_secret, &team_dir);
+
+        assert!(result.is_ok());
+        assert!(!team_dir.exists());
+    }
 }

@@ -1,4 +1,5 @@
 import { isTauri } from '@/lib/utils';
+import { TEAM_REPO_DIR } from '@/lib/build-config';
 
 // File operation helpers
 export async function createNewFile(
@@ -45,14 +46,58 @@ export async function renameItem(oldPath: string, newPath: string): Promise<bool
   }
 }
 
+/**
+ * Map of synced DocType directory names to their CRDT doc type identifiers.
+ */
+const SYNCED_DIR_TO_DOCTYPE: Record<string, string> = {
+  'skills': 'skills',
+  '.mcp': 'mcp',
+  'knowledge': 'knowledge',
+  '_meta': 'meta',
+  '_secrets': 'secrets',
+};
+
+/**
+ * If `absolutePath` is inside a team-synced DocType directory, mark the file
+ * as deleted in the CRDT so other nodes don't resurrect it.
+ * Best-effort: failures are silently ignored — the sync loop will eventually
+ * detect the deletion on disk.
+ */
+export async function markTeamFileDeleted(
+  absolutePath: string,
+  workspacePath?: string,
+): Promise<void> {
+  if (!isTauri() || !workspacePath) return;
+  const teamDir = `${workspacePath}/${TEAM_REPO_DIR}`;
+  if (!absolutePath.startsWith(teamDir + '/')) return;
+
+  const relToTeam = absolutePath.slice(teamDir.length + 1); // e.g. "skills/my-skill"
+  const firstSeg = relToTeam.split('/')[0];               // e.g. "skills"
+  const docType = SYNCED_DIR_TO_DOCTYPE[firstSeg];
+  if (!docType) return;
+
+  const relPath = relToTeam.slice(firstSeg.length + 1);    // e.g. "my-skill"
+  if (!relPath) return;
+
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke('oss_mark_file_deleted', { docType, path: relPath });
+  } catch {
+    // best-effort
+  }
+}
+
 export async function deleteItem(
   path: string,
   isDirectory: boolean,
+  workspacePath?: string,
 ): Promise<boolean> {
   if (!isTauri()) return false;
   try {
     const { remove } = await import("@tauri-apps/plugin-fs");
     await remove(path, { recursive: isDirectory });
+    // Mark in CRDT if this was a team-synced file
+    markTeamFileDeleted(path, workspacePath);
     return true;
   } catch (error) {
     console.error("[FileTree] Failed to delete:", error);
@@ -178,13 +223,29 @@ export async function duplicateItem(sourcePath: string): Promise<boolean> {
   return copyItem(sourcePath, parentDir);
 }
 
+function isFsScopeError(error: unknown): boolean {
+  return error instanceof Error && error.message.includes('forbidden path:');
+}
+
 /** Read file content for undo backup (text files only) */
-export async function readFileContent(path: string): Promise<string | undefined> {
+export async function readFileContent(
+  workspacePath: string,
+  path: string,
+): Promise<string | undefined> {
   if (!isTauri()) return undefined;
   try {
     const { readTextFile } = await import("@tauri-apps/plugin-fs");
     return await readTextFile(path);
-  } catch {
-    return undefined; // Binary or unreadable
+  } catch (error) {
+    if (!isFsScopeError(error)) {
+      return undefined; // Binary or unreadable
+    }
+
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      return await invoke<string>("read_workspace_text_file", { workspacePath, path });
+    } catch {
+      return undefined;
+    }
   }
 }

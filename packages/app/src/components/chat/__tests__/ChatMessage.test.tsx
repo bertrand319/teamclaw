@@ -1,7 +1,8 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { render, screen, cleanup } from '@testing-library/react';
 import { useStreamingStore } from '@/stores/streaming';
 import { useSessionStore, sessionLookupCache } from '@/stores/session';
+import { ChatMessage } from '../ChatMessage';
 
 // ── Mocks ──────────────────────────────────────────────────────────────
 
@@ -40,11 +41,6 @@ function makeMessage(overrides: Record<string, unknown> = {}) {
   };
 }
 
-async function importChatMessage() {
-  const mod = await import('../ChatMessage');
-  return mod.ChatMessage;
-}
-
 // ── Tests ──────────────────────────────────────────────────────────────
 
 describe('ChatMessage', () => {
@@ -59,9 +55,11 @@ describe('ChatMessage', () => {
     useSessionStore.setState({ activeSessionId: null });
   });
 
-  it('user message renders its content', async () => {
-    const ChatMessage = await importChatMessage();
+  afterEach(() => {
+    cleanup();
+  });
 
+  it('user message renders its content', () => {
     const message = makeMessage({
       id: 'msg-user-1',
       role: 'user',
@@ -72,9 +70,7 @@ describe('ChatMessage', () => {
     expect(container.textContent).toContain('Hello from the user');
   });
 
-  it('assistant message renders its content', async () => {
-    const ChatMessage = await importChatMessage();
-
+  it('assistant message renders its content', () => {
     const message = makeMessage({
       id: 'msg-asst-1',
       role: 'assistant',
@@ -93,9 +89,48 @@ describe('ChatMessage', () => {
     expect(container.textContent).toContain('Hello from the assistant');
   });
 
-  it('code blocks within messages render correctly', async () => {
-    const ChatMessage = await importChatMessage();
+  it('only shows copy action on the last assistant text output in a group', () => {
+    const firstMessage = makeMessage({
+      id: 'msg-asst-group-1',
+      role: 'assistant',
+      content: 'First assistant text',
+      isStreaming: false,
+    });
 
+    const lastMessage = makeMessage({
+      id: 'msg-asst-group-2',
+      role: 'assistant',
+      content: 'Last assistant text',
+      isStreaming: false,
+    });
+
+    useSessionStore.setState({ activeSessionId: 'sess-1' });
+    sessionLookupCache.set('sess-1', {
+      id: 'sess-1',
+      messages: [firstMessage, lastMessage],
+      updatedAt: new Date(),
+    } as never);
+
+    const { rerender } = render(
+      <ChatMessage
+        message={firstMessage}
+        tokenGroupInfo={{ hideTokenUsage: true }}
+      />,
+    );
+
+    expect(screen.queryByTitle('Copy')).toBeNull();
+
+    rerender(
+      <ChatMessage
+        message={lastMessage}
+        tokenGroupInfo={{ hideTokenUsage: false }}
+      />,
+    );
+
+    expect(screen.getByTitle('Copy')).toBeTruthy();
+  });
+
+  it('code blocks within messages render correctly', () => {
     const message = makeMessage({
       id: 'msg-code-1',
       role: 'assistant',
@@ -116,9 +151,7 @@ describe('ChatMessage', () => {
     expect(codeEl).not.toBeNull();
   });
 
-  it('thinking indicator renders BEFORE message content during streaming', async () => {
-    const ChatMessage = await importChatMessage();
-
+  it('thinking indicator renders BEFORE message content during streaming', () => {
     // Message with thinking parts but no content yet (early streaming state)
     const message = makeMessage({
       id: 'msg-thinking-1',
@@ -148,5 +181,49 @@ describe('ChatMessage', () => {
     const firstChild = messageContainer?.firstElementChild;
     // First child should contain thinking-related content (Brain icon or "Thinking" text)
     expect(firstChild?.textContent).toMatch(/Thinking|analyzing/i);
+  });
+
+  it('renders completed compaction messages as a divider row without copy actions', () => {
+    const message = makeMessage({
+      id: 'msg-compaction',
+      role: 'user',
+      content: '',
+      displayKind: 'compaction',
+      compaction: { auto: true, overflow: true, completed: true },
+    });
+
+    const { container } = render(<ChatMessage message={message} />);
+
+    expect(container.textContent).toContain('Context automatically compacted');
+    expect(container.textContent).not.toContain('Copy');
+    expect(container.querySelector('[data-message-kind="compaction"]')).toBeTruthy();
+  });
+
+  it('renders in-progress compaction messages with a pending title', () => {
+    const message = makeMessage({
+      id: 'msg-compaction-pending',
+      role: 'user',
+      content: '',
+      displayKind: 'compaction',
+      compaction: { auto: true, overflow: true, completed: false },
+    });
+
+    const { container } = render(<ChatMessage message={message} />);
+
+    expect(container.textContent).toContain('Compacting context automatically...');
+  });
+
+  it('does not render hidden synthetic messages', () => {
+    const message = makeMessage({
+      id: 'msg-hidden',
+      role: 'user',
+      content: 'hidden text',
+      displayKind: 'synthetic',
+      hidden: true,
+    });
+
+    const { container } = render(<ChatMessage message={message} />);
+
+    expect(container.textContent).toBe('');
   });
 });

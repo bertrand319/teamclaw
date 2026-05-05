@@ -77,6 +77,7 @@ interface FileSyncStatus {
 
 interface TeamOssState {
   // State
+  _initDone: boolean  // true after initialize() completes (success or failure)
   configured: boolean // local config exists (oss.enabled), true even when offline
   connected: boolean
   restoring: boolean // true while oss_restore_sync is in progress on startup
@@ -97,11 +98,21 @@ interface TeamOssState {
     teamName: string
     ownerName: string
     ownerEmail: string
+    fcEndpoint: string
+    llmBaseUrl?: string
+    llmModel?: string
+    llmModelName?: string
+    llmModels?: string
   }) => Promise<OssTeamInfo>
   joinTeam: (params: {
     workspacePath: string
     teamId: string
     teamSecret: string
+    fcEndpoint: string
+    llmBaseUrl?: string
+    llmModel?: string
+    llmModelName?: string
+    llmModels?: string
   }) => Promise<OssJoinResult>
   leaveTeam: (workspacePath: string) => Promise<void>
   syncNow: (workspacePath: string) => Promise<void>
@@ -114,12 +125,22 @@ interface TeamOssState {
     workspacePath: string
     teamId: string
     teamSecret: string
+    fcEndpoint: string
     name: string
     email: string
     note: string
   }) => Promise<void>
+  updateServiceConfig: (params: {
+    workspacePath: string
+    teamEndpoint?: string
+    llmBaseUrl?: string
+    llmModel?: string
+    llmModelName?: string
+    llmModels?: string
+  }) => Promise<void>
   reconnect: (workspacePath: string) => Promise<void>
   resetSync: (workspacePath: string) => Promise<void>
+  restoreDeleted: (workspacePath: string) => Promise<number>
   loadPendingApplication: (workspacePath: string) => Promise<void>
   cancelApplication: (workspacePath: string) => Promise<void>
   cleanup: () => void
@@ -128,6 +149,7 @@ interface TeamOssState {
 
 export const useTeamOssStore = create<TeamOssState>((set, get) => ({
   // initial state
+  _initDone: false,
   configured: false,
   connected: false,
   restoring: false,
@@ -181,6 +203,7 @@ export const useTeamOssStore = create<TeamOssState>((set, get) => ({
       })
 
       const config = await invoke<OssTeamConfig | null>('oss_get_team_config', { workspacePath })
+      console.log('[OSS] oss_get_team_config result:', workspacePath, config)
       if (config?.enabled) {
         set({ configured: true, restoring: true })
         try {
@@ -210,8 +233,11 @@ export const useTeamOssStore = create<TeamOssState>((set, get) => ({
         }
       }
     } catch (e) {
-      console.error('OSS sync init failed:', e)
+      console.error('[OSS] sync init failed:', e)
       set({ error: String(e) })
+    } finally {
+      console.log('[OSS] init done, configured:', get().configured, 'connected:', get().connected)
+      set({ _initDone: true })
     }
   },
 
@@ -243,12 +269,16 @@ export const useTeamOssStore = create<TeamOssState>((set, get) => ({
   createTeam: async (params) => {
     try {
       const info = await invoke<OssTeamInfo>('oss_create_team', {
-        ...params,
-        teamEndpoint: buildConfig.s3?.teamEndpoint ?? '',
+        workspacePath: params.workspacePath,
+        teamName: params.teamName,
+        ownerName: params.ownerName,
+        ownerEmail: params.ownerEmail,
+        teamEndpoint: params.fcEndpoint,
         forcePathStyle: buildConfig.s3?.forcePathStyle ?? false,
-        llmBaseUrl: buildConfig.team.llm.baseUrl || null,
-        llmModel: buildConfig.team.llm.model || null,
-        llmModelName: buildConfig.team.llm.modelName || null,
+        llmBaseUrl: params.llmBaseUrl || null,
+        llmModel: params.llmModel || null,
+        llmModelName: params.llmModelName || null,
+        llmModels: params.llmModels || null,
       })
       set({ configured: true, connected: true, teamInfo: info, error: null })
       // Refresh file tree so the new teamclaw-team directory appears
@@ -264,12 +294,15 @@ export const useTeamOssStore = create<TeamOssState>((set, get) => ({
   joinTeam: async (params) => {
     try {
       const result = await invoke<OssJoinResult>('oss_join_team', {
-        ...params,
-        teamEndpoint: buildConfig.s3?.teamEndpoint ?? '',
+        workspacePath: params.workspacePath,
+        teamId: params.teamId,
+        teamSecret: params.teamSecret,
+        teamEndpoint: params.fcEndpoint,
         forcePathStyle: buildConfig.s3?.forcePathStyle ?? false,
-        llmBaseUrl: buildConfig.team.llm.baseUrl || null,
-        llmModel: buildConfig.team.llm.model || null,
-        llmModelName: buildConfig.team.llm.modelName || null,
+        llmBaseUrl: params.llmBaseUrl || null,
+        llmModel: params.llmModel || null,
+        llmModelName: params.llmModelName || null,
+        llmModels: params.llmModels || null,
       })
 
       if (result.status === 'not_member') {
@@ -332,6 +365,32 @@ export const useTeamOssStore = create<TeamOssState>((set, get) => ({
     }
   },
 
+  restoreDeleted: async (workspacePath) => {
+    set({ syncing: true })
+    try {
+      let total = 0
+      for (const dt of ['skills', 'mcp', 'knowledge', 'meta', 'secrets']) {
+        const count = await invoke<number>('oss_restore_deleted', { docType: dt })
+        total += count
+      }
+      // Only trigger sync if something was actually restored
+      if (total > 0) {
+        try {
+          const status = await invoke<SyncStatus>('oss_sync_now', { workspacePath })
+          set({ syncStatus: status, syncing: false })
+        } catch {
+          set({ syncing: false })
+        }
+      } else {
+        set({ syncing: false })
+      }
+      return total
+    } catch (e) {
+      set({ syncing: false, error: String(e) })
+      throw e
+    }
+  },
+
   loadSyncStatus: async (workspacePath) => {
     try {
       const status = await invoke<SyncStatus>('oss_get_sync_status', { workspacePath })
@@ -358,16 +417,38 @@ export const useTeamOssStore = create<TeamOssState>((set, get) => ({
     return await invoke<string>('oss_reset_team_secret', { workspacePath })
   },
 
+  updateServiceConfig: async (params) => {
+    try {
+      await invoke('oss_update_service_config', {
+        workspacePath: params.workspacePath,
+        teamEndpoint: params.teamEndpoint || null,
+        llmBaseUrl: params.llmBaseUrl || null,
+        llmModel: params.llmModel || null,
+        llmModelName: params.llmModelName || null,
+        llmModels: params.llmModels || null,
+      })
+      set({ error: null })
+    } catch (e) {
+      set({ error: String(e) })
+      throw e
+    }
+  },
+
   applyToTeam: async (params) => {
     try {
       await invoke('oss_apply_team', {
-        ...params,
-        teamEndpoint: buildConfig.s3?.teamEndpoint ?? '',
+        workspacePath: params.workspacePath,
+        teamId: params.teamId,
+        teamSecret: params.teamSecret,
+        name: params.name,
+        email: params.email,
+        note: params.note,
+        teamEndpoint: params.fcEndpoint,
         forcePathStyle: buildConfig.s3?.forcePathStyle ?? false,
       })
       const pending: PendingApplication = {
         teamId: params.teamId,
-        teamEndpoint: buildConfig.s3?.teamEndpoint ?? '',
+        teamEndpoint: params.fcEndpoint,
         appliedAt: new Date().toISOString(),
       }
       set({ pendingApplication: pending, error: null })
@@ -402,6 +483,7 @@ export const useTeamOssStore = create<TeamOssState>((set, get) => ({
     }
     set({
       _unlisten: null,
+      _initDone: false,
       configured: false,
       connected: false,
       restoring: false,

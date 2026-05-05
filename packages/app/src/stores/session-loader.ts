@@ -27,12 +27,14 @@ import {
 import { trackEvent } from "@/stores/telemetry";
 import { sessionDataCache } from "./session-data-cache";
 import {
+  loadPinnedSessionIds,
   savePinnedSessionIds,
-  sanitizePinnedSessionIds,
 } from "./session-pins";
 
 type SessionSet = (fn: ((state: SessionState) => Partial<SessionState>) | Partial<SessionState>) => void;
 type SessionGet = () => SessionState;
+
+const MAX_BULK_MESSAGE_SESSION_LOAD = 30;
 
 export function createLoaderActions(set: SessionSet, get: SessionGet) {
   return {
@@ -44,10 +46,14 @@ export function createLoaderActions(set: SessionSet, get: SessionGet) {
       useStreamingStore.getState().clearStreaming();
       set({
         sessions: [],
+        pinnedSessionIds: [],
+        currentWorkspacePath: null,
         activeSessionId: null,
         messageQueue: [],
         pendingPermissions: [],
         pendingQuestions: [],
+        pendingQuestionIdsBySession: {},
+        sessionStatuses: {},
         todos: [],
         sessionDiff: [],
         sessionError: null,
@@ -122,11 +128,11 @@ export function createLoaderActions(set: SessionSet, get: SessionGet) {
         // Sort by updatedAt descending (most recently active first)
         newSessions.sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
 
-        const pinnedSessionIds = sanitizePinnedSessionIds(
-          get().pinnedSessionIds,
-          newSessions.map((session) => session.id),
-        );
-        savePinnedSessionIds(pinnedSessionIds);
+        const nextWorkspacePath = workspacePath ?? null;
+        const pinnedSessionIds =
+          get().currentWorkspacePath === nextWorkspacePath
+            ? get().pinnedSessionIds
+            : loadPinnedSessionIds(nextWorkspacePath);
 
         // UI-level pagination: initially show first PAGE_SIZE sessions
         const hasMore = newSessions.length > UI_PAGE_SIZE;
@@ -164,6 +170,7 @@ export function createLoaderActions(set: SessionSet, get: SessionGet) {
         set({
           sessions: merged,
           pinnedSessionIds,
+          currentWorkspacePath: nextWorkspacePath,
           isLoading: false,
           hasMoreSessions: hasMore,
           visibleSessionCount: Math.min(newSessions.length, UI_PAGE_SIZE),
@@ -304,7 +311,6 @@ export function createLoaderActions(set: SessionSet, get: SessionGet) {
         sessionDiff: cachedData?.diff || [],
         sessionError: null,
         sessionStatus: null,
-        pendingPermissions: [],
         pendingQuestions: cachedData?.pendingQuestions || [],
       });
 
@@ -549,20 +555,40 @@ export function createLoaderActions(set: SessionSet, get: SessionGet) {
         const client = getOpenCodeClient();
         const session = get().sessions.find((s) => s.id === id);
         const directory = session?.directory;
+        const wasActiveSession = get().activeSessionId === id;
         await client.archiveSession(id, directory);
 
         // Clean up cache for archived session
         sessionDataCache.delete(id);
+        if (wasActiveSession) {
+          cleanupAllChildSessions();
+          useStreamingStore.getState().clearStreaming();
+        }
 
         set((state) => {
           const newSessions = state.sessions.filter((s) => s.id !== id);
           const pinnedSessionIds = state.pinnedSessionIds.filter((sessionId) => sessionId !== id);
-          savePinnedSessionIds(pinnedSessionIds);
+          const pendingQuestionIdsBySession = { ...(state.pendingQuestionIdsBySession || {}) };
+          delete pendingQuestionIdsBySession[id];
+          const sessionStatuses = { ...(state.sessionStatuses || {}) };
+          delete sessionStatuses[id];
+          savePinnedSessionIds(state.currentWorkspacePath ?? directory ?? null, pinnedSessionIds);
           updateSessionCache(newSessions);
 
           return {
             sessions: newSessions,
             pinnedSessionIds,
+            pendingQuestions: state.pendingQuestions.filter((q) => q.sessionId !== id),
+            pendingPermissions: state.pendingPermissions.filter(
+              (entry) =>
+                entry.childSessionId !== id &&
+                entry.permission.sessionID !== id &&
+                entry.ownerSessionId !== id,
+            ),
+            pendingQuestionIdsBySession,
+            sessionStatuses,
+            sessionStatus: wasActiveSession ? null : state.sessionStatus,
+            sessionError: wasActiveSession ? null : state.sessionError,
             activeSessionId:
               state.activeSessionId === id
                 ? (newSessions[0]?.id ?? null)
@@ -633,6 +659,16 @@ export function createLoaderActions(set: SessionSet, get: SessionGet) {
         const total = activeSessions.length;
         let loaded = total - sessionsNeedingMessages.length;
         set({ dashboardLoadProgress: { loaded, total } });
+
+        if (sessionsNeedingMessages.length > MAX_BULK_MESSAGE_SESSION_LOAD) {
+          const message = `Skipped loading historical messages: ${sessionsNeedingMessages.length} sessions need messages, above the safe limit of ${MAX_BULK_MESSAGE_SESSION_LOAD}.`;
+          console.warn(`[Session] ${message}`);
+          set({
+            dashboardLoading: false,
+            dashboardLoadError: message,
+          });
+          return;
+        }
 
         const CONCURRENCY = 5;
         const errors: string[] = [];

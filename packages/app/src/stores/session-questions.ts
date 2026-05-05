@@ -19,15 +19,84 @@ import {
 } from "@/stores/streaming";
 import { sessionDataCache } from "./session-data-cache";
 import {
-  buildTerminalInputFollowUpMessage,
-  isTerminalCancelAnswer,
-  isSyntheticTerminalQuestionId,
-} from "@/lib/terminal-interaction";
+  addPendingQuestionActivity,
+  pendingQuestionActivityKey,
+  removePendingQuestionActivity,
+  resolveSessionActivityOwner,
+} from "@/lib/session-list-activity";
 
 type SessionSet = (fn: ((state: SessionState) => Partial<SessionState>) | Partial<SessionState>) => void;
 type SessionGet = () => SessionState;
 
+function isSamePendingQuestion(existing: PendingQuestionState, incoming: PendingQuestionState): boolean {
+  if (incoming.questionId && existing.questionId === incoming.questionId) return true;
+  if (incoming.toolCallId && existing.toolCallId === incoming.toolCallId) return true;
+  return false;
+}
+
+function upsertPendingQuestion(
+  questions: PendingQuestionState[] | undefined,
+  incoming: PendingQuestionState,
+): PendingQuestionState[] {
+  const existing = questions || [];
+  return [
+    ...existing.filter((question) => !isSamePendingQuestion(question, incoming)),
+    incoming,
+  ].slice(-20);
+}
+
 export function createQuestionActions(set: SessionSet, get: SessionGet) {
+  const clearPendingQuestion = (pendingQuestion: PendingQuestionState) => {
+    const { activeSessionId, sessions } = get();
+    const toolCallId = pendingQuestion.toolCallId;
+    const sessionId = pendingQuestion.sessionId || activeSessionId;
+    const ownerSessionId = resolveSessionActivityOwner(sessionId, sessions, activeSessionId);
+    const questionKey = pendingQuestionActivityKey(pendingQuestion);
+
+    const cacheSessionIds = Array.from(
+      new Set([sessionId, ownerSessionId].filter(Boolean) as string[]),
+    );
+    for (const cacheSessionId of cacheSessionIds) {
+      const cached = sessionDataCache.get(cacheSessionId);
+      if (cached) {
+        const qs = (cached.pendingQuestions || []).filter(
+          (q) => !isSamePendingQuestion(q, pendingQuestion),
+        );
+        sessionDataCache.set(cacheSessionId, {
+          ...cached,
+          pendingQuestions: qs,
+        });
+      }
+    }
+
+    set((state) => ({
+      sessions: state.sessions.map((s) =>
+        s.id === activeSessionId
+          ? {
+              ...s,
+              messages: s.messages.map((m) => ({
+                ...m,
+                toolCalls: m.toolCalls?.map((tc) =>
+                  tc.id === toolCallId
+                    ? { ...tc, status: "completed" as const }
+                    : tc,
+                ),
+              })),
+              updatedAt: new Date(),
+            }
+          : s,
+      ),
+      pendingQuestions: state.pendingQuestions.filter(
+        (q) => !isSamePendingQuestion(q, pendingQuestion),
+      ),
+      pendingQuestionIdsBySession: removePendingQuestionActivity(
+        state.pendingQuestionIdsBySession || {},
+        sessionId,
+        questionKey,
+      ),
+    }));
+  };
+
   return {
     // Answer question tool
     answerQuestion: async (answers: Record<string, string>, questionId?: string) => {
@@ -58,71 +127,6 @@ export function createQuestionActions(set: SessionSet, get: SessionGet) {
         );
         console.log("[Question] Answers:", formattedAnswers);
 
-        if (
-          pendingQuestion.source === "terminal_input" ||
-          isSyntheticTerminalQuestionId(pendingQuestion.questionId)
-        ) {
-          const answerText = formattedAnswers.flat().join("; ").trim();
-          const streamingMessageId = useStreamingStore.getState().streamingMessageId;
-
-          if (streamingMessageId) {
-            await get().abortSession();
-          }
-
-          set((state) => ({
-            sessions: state.sessions.map((s) =>
-              s.id === activeSessionId
-                ? {
-                    ...s,
-                    messages: s.messages.map((m) => ({
-                      ...m,
-                      toolCalls: m.toolCalls?.map((tc) =>
-                        tc.id === pendingQuestion.toolCallId
-                          ? {
-                              ...tc,
-                              status: "failed" as const,
-                              questions: undefined,
-                            }
-                          : tc,
-                      ),
-                    })),
-                    updatedAt: new Date(),
-                  }
-                : s,
-            ),
-            pendingQuestions: state.pendingQuestions.filter(
-              (q) => q.questionId !== pendingQuestion.questionId,
-            ),
-          }));
-
-          if (activeSessionId) {
-            const cached = sessionDataCache.get(activeSessionId);
-            if (cached) {
-              const qs = (cached.pendingQuestions || []).filter(
-                (q) => q.questionId !== pendingQuestion.questionId,
-              );
-              sessionDataCache.set(activeSessionId, {
-                ...cached,
-                pendingQuestions: qs,
-              });
-            }
-          }
-
-          if (isTerminalCancelAnswer(answerText)) {
-            return;
-          }
-
-          const followUp = buildTerminalInputFollowUpMessage({
-            command: pendingQuestion.terminalInputContext?.command || "",
-            prompt: pendingQuestion.terminalInputContext?.prompt || "",
-            answer: answerText,
-            kind: pendingQuestion.terminalInputContext?.kind || "generic",
-          });
-
-          await get().sendMessage(followUp);
-          return;
-        }
-
         try {
           await client.replyQuestion(
             pendingQuestion.questionId,
@@ -134,50 +138,55 @@ export function createQuestionActions(set: SessionSet, get: SessionGet) {
           throw replyError;
         }
 
-        const toolCallId = pendingQuestion.toolCallId;
-
-        // Clear this pending question from both state and cache
-        if (activeSessionId) {
-          const cached = sessionDataCache.get(activeSessionId);
-          if (cached) {
-            const qs = (cached.pendingQuestions || []).filter(
-              (q) => q.questionId !== pendingQuestion.questionId,
-            );
-            sessionDataCache.set(activeSessionId, {
-              ...cached,
-              pendingQuestions: qs,
-            });
-          }
-        }
-
-        set((state) => ({
-          sessions: state.sessions.map((s) =>
-            s.id === activeSessionId
-              ? {
-                  ...s,
-                  messages: s.messages.map((m) => ({
-                    ...m,
-                    toolCalls: m.toolCalls?.map((tc) =>
-                      tc.id === toolCallId
-                        ? { ...tc, status: "completed" as const }
-                        : tc,
-                    ),
-                  })),
-                  updatedAt: new Date(),
-                }
-              : s,
-          ),
-          pendingQuestions: state.pendingQuestions.filter(
-            (q) => q.questionId !== pendingQuestion.questionId,
-          ),
-        }));
+        clearPendingQuestion(pendingQuestion);
       } catch (error) {
         useStreamingStore.getState().clearStreaming();
         set((state) => ({
           error:
             error instanceof Error ? error.message : "Failed to answer question",
           pendingQuestions: state.pendingQuestions.filter(
-            (q) => q.questionId !== pendingQuestion.questionId,
+            (q) => !isSamePendingQuestion(q, pendingQuestion),
+          ),
+        }));
+      }
+    },
+
+    skipQuestion: async (questionId?: string) => {
+      const { pendingQuestions, activeSessionId } = get();
+      if (!activeSessionId) return;
+      const pendingQuestion = questionId
+        ? pendingQuestions.find((q) => q.questionId === questionId)
+        : pendingQuestions[0];
+      if (!pendingQuestion) return;
+      if (!pendingQuestion.questionId) {
+        console.warn("[Question] Cannot skip — questionId not yet set (waiting for question.asked SSE event)");
+        return;
+      }
+
+      try {
+        const client = getOpenCodeClient();
+
+        console.log(
+          "[Question] Rejecting question:",
+          pendingQuestion.questionId,
+        );
+
+        try {
+          await client.rejectQuestion(pendingQuestion.questionId);
+          console.log("[Question] Reject sent successfully");
+        } catch (rejectError) {
+          console.error("[Question] Reject API error:", rejectError);
+          throw rejectError;
+        }
+
+        clearPendingQuestion(pendingQuestion);
+      } catch (error) {
+        useStreamingStore.getState().clearStreaming();
+        set((state) => ({
+          error:
+            error instanceof Error ? error.message : "Failed to skip question",
+          pendingQuestions: state.pendingQuestions.filter(
+            (q) => !isSamePendingQuestion(q, pendingQuestion),
           ),
         }));
       }
@@ -189,10 +198,12 @@ export function createQuestionActions(set: SessionSet, get: SessionGet) {
         set({ pendingQuestions: [] });
       } else {
         set((state) => ({
-          pendingQuestions: [
-            ...state.pendingQuestions.filter((q) => q.questionId !== question.questionId),
-            question,
-          ].slice(-20),
+          pendingQuestions: upsertPendingQuestion(state.pendingQuestions, question),
+          pendingQuestionIdsBySession: addPendingQuestionActivity(
+            state.pendingQuestionIdsBySession || {},
+            question.sessionId || state.activeSessionId,
+            pendingQuestionActivityKey(question),
+          ),
         }));
       }
     },
@@ -206,9 +217,13 @@ export function createQuestionActions(set: SessionSet, get: SessionGet) {
         setActiveSession: navigateToSession,
       } = get();
       const { streamingMessageId } = useStreamingStore.getState();
+      const ownerSessionId = resolveSessionActivityOwner(event.sessionId, currentSessions, event.sessionId);
 
       const existing =
-        pendingQuestions.find((q) => q.toolCallId === event.tool?.callId) || null;
+        pendingQuestions.find((q) => q.toolCallId === event.tool?.callId) ||
+        sessionDataCache.get(event.sessionId)?.pendingQuestions?.find((q) => q.toolCallId === event.tool?.callId) ||
+        (ownerSessionId ? sessionDataCache.get(ownerSessionId)?.pendingQuestions?.find((q) => q.toolCallId === event.tool?.callId) : undefined) ||
+        null;
 
       console.log("[Session] Question asked:", event.id);
 
@@ -248,37 +263,39 @@ export function createQuestionActions(set: SessionSet, get: SessionGet) {
         source: "opencode" as const,
       };
 
-      if (event.sessionId !== activeSessionId) {
-        // Cache the question for non-active sessions so it's restored on switch
-        const cached = sessionDataCache.get(event.sessionId) || { todos: [], diff: [] };
-        const existingQuestions = cached.pendingQuestions || [];
-        sessionDataCache.set(event.sessionId, {
+      const cacheQuestion = (sessionId: string | null | undefined) => {
+        if (!sessionId) return;
+        const cached = sessionDataCache.get(sessionId) || { todos: [], diff: [] };
+        sessionDataCache.set(sessionId, {
           ...cached,
-          pendingQuestions: [
-            ...existingQuestions.filter((q) => q.questionId !== questionData.questionId),
-            questionData,
-          ],
+          pendingQuestions: upsertPendingQuestion(cached.pendingQuestions, questionData),
         });
+      };
+
+      cacheQuestion(event.sessionId);
+      if (ownerSessionId !== event.sessionId) {
+        cacheQuestion(ownerSessionId);
+      }
+
+      if (ownerSessionId !== activeSessionId) {
+        set((state) => ({
+          pendingQuestionIdsBySession: addPendingQuestionActivity(
+            state.pendingQuestionIdsBySession || {},
+            event.sessionId,
+            pendingQuestionActivityKey(questionData),
+          ),
+        }));
         return;
       }
 
       set((state) => ({
-        pendingQuestions: [
-          ...state.pendingQuestions.filter((q) => q.questionId !== questionData.questionId),
-          questionData,
-        ].slice(-20),
+        pendingQuestions: upsertPendingQuestion(state.pendingQuestions, questionData),
+        pendingQuestionIdsBySession: addPendingQuestionActivity(
+          state.pendingQuestionIdsBySession || {},
+          event.sessionId,
+          pendingQuestionActivityKey(questionData),
+        ),
       }));
-
-      // Also save to cache so it survives session switching
-      const cachedActive = sessionDataCache.get(activeSessionId!) || { todos: [], diff: [] };
-      const activeQuestions = cachedActive.pendingQuestions || [];
-      sessionDataCache.set(activeSessionId!, {
-        ...cachedActive,
-        pendingQuestions: [
-          ...activeQuestions.filter((q) => q.questionId !== questionData.questionId),
-          questionData,
-        ],
-      });
 
       // If we have tool info, also update the tool call in the message
       if (event.tool && streamingMessageId) {

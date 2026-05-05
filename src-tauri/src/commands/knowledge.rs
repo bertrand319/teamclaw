@@ -228,18 +228,21 @@ pub async fn rag_search(
     let instance = instance.lock().await;
 
     let top_k = top_k.unwrap_or(5);
-    let mode =
-        teamclaw_rag::hybrid_search::SearchMode::from_str(search_mode.as_deref().unwrap_or("hybrid"));
+    let mode = teamclaw_rag::hybrid_search::SearchMode::parse_or_hybrid(
+        search_mode.as_deref().unwrap_or("hybrid"),
+    );
 
     teamclaw_rag::search::search(
         &instance.db,
         &instance.embedding,
         instance.bm25_index.as_ref(),
         &instance.config,
-        &query,
-        top_k,
-        mode,
-        min_score,
+        teamclaw_rag::search::SearchParams {
+            query: &query,
+            top_k,
+            mode,
+            min_score,
+        },
     )
     .await
     .map_err(|e| format!("Search failed: {}", e))
@@ -464,7 +467,7 @@ pub async fn rag_list_memories(workspace_path: String) -> Result<Vec<MemoryRecor
         }
     }
 
-    memories.sort_by(|a, b| b.updated.cmp(&a.updated));
+    memories.sort_by_key(|memory| std::cmp::Reverse(memory.updated.clone()));
     Ok(memories)
 }
 

@@ -13,7 +13,7 @@ use std::io::Cursor;
 use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Runtime};
 
-const DEFAULT_REPO_OWNER: &str = "diffrent-ai-studio";
+const DEFAULT_REPO_OWNER: &str = "different-ai-studio";
 const DEFAULT_REPO_NAME: &str = "teamclaw";
 const DEFAULT_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQzODk5QzIxMUI4RkY3OTkKUldTWjk0OGJJWnlKUTlnZVdEaUsyUGJ4WFpaYmlQZW03NGdlNVdyUlRMNGtKVVBKeTk3NEYwZXAK";
 const APP_USER_AGENT: &str = concat!("teamclaw-updater/", env!("CARGO_PKG_VERSION"));
@@ -634,11 +634,8 @@ pub async fn download_and_install_update<R: Runtime>(
     let pubkey = get_updater_pubkey();
     verify_signature(&bytes, &signature, pubkey)?;
 
-    // 3. Snapshot keychain env blob to disk before replacing the app bundle.
-    //    The current process still has keychain access (matching code signature).
-    //    After the bundle is replaced, the new binary's signature won't match the
-    //    keychain ACL, so this disk snapshot is the only way the new version can
-    //    recover secrets on first launch.
+    // 3. Snapshot legacy keychain env data only for installs that have not yet
+    //    migrated to the local encrypted blob. After migration this hook is a no-op.
     super::env_vars::snapshot_env_blob_to_disk();
 
     // 4. Install (extract tar.gz and replace .app bundle)

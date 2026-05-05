@@ -16,11 +16,20 @@ import {
   Clock,
   Copy,
   Share2,
+  Settings,
+  Save,
 } from 'lucide-react'
 import { VersionHistorySection } from './VersionHistorySection'
+import { HostLlmConfig } from './HostLlmConfig'
 import { cn, isTauri, copyToClipboard } from '@/lib/utils'
 import { toast } from 'sonner'
 import { buildConfig, TEAMCLAW_DIR, TEAM_REPO_DIR } from '@/lib/build-config'
+import {
+  buildTeamProviderConfig,
+  loadTeamProviderFormState,
+  removeTeamProviderFile,
+  saveTeamProviderFile,
+} from '@/lib/team-provider'
 import { useTeamModeStore } from '@/stores/team-mode'
 import { useP2pEngineStore } from '@/stores/p2p-engine'
 import { useTeamMembersStore } from '@/stores/team-members'
@@ -79,11 +88,21 @@ export function TeamP2PConfig() {
   const [joinTicketInput, setJoinTicketInput] = React.useState('')
   const [joinLoading, setJoinLoading] = React.useState(false)
   const [createLoading, setCreateLoading] = React.useState(false)
-  const [showCreateForm, setShowCreateForm] = React.useState(false)
   const [createTeamName, setCreateTeamName] = React.useState('')
   const [createInviteCode, setCreateInviteCode] = React.useState('')
   const [createOwnerName, setCreateOwnerName] = React.useState('')
   const [createOwnerEmail, setCreateOwnerEmail] = React.useState('')
+  const defaultLlmUrl = buildConfig.team.llm.baseUrl || ''
+  const [createHostLlm, setCreateHostLlm] = React.useState(!!defaultLlmUrl)
+  const [createLlmUrl, setCreateLlmUrl] = React.useState(defaultLlmUrl)
+  const defaultLlmModels = (buildConfig.team.llm.models ?? []).map((m) => ({ id: m.id, name: m.name }))
+  const [createLlmModels, setCreateLlmModels] = React.useState(defaultLlmModels)
+  // Service config form (for connected state editing)
+  const [cfgHostLlm, setCfgHostLlm] = React.useState(false)
+  const [cfgLlmUrl, setCfgLlmUrl] = React.useState('')
+  const [cfgLlmModels, setCfgLlmModels] = React.useState<Array<{ id: string; name: string }>>([])
+  const [cfgSaving, setCfgSaving] = React.useState(false)
+  const [cfgLoaded, setCfgLoaded] = React.useState(false)
   const [dissolveLoading, setDissolveLoading] = React.useState(false)
   const [confirmDissolve, setConfirmDissolve] = React.useState(false)
 
@@ -128,6 +147,7 @@ export function TeamP2PConfig() {
 
   const allowedMembers = syncStatus?.members ?? []
   const isOwner = syncStatus?.role === 'owner'
+  const canManageServiceConfig = isOwner || syncStatus?.role === 'manager'
   const isConnected = engineSnapshot?.status === 'connected' || (syncStatus?.connected ?? false)
   const docTicket = syncStatus?.docTicket ?? null
 
@@ -177,7 +197,32 @@ export function TeamP2PConfig() {
       await engineInit()
       // Always fetch latest peer snapshot (init() is a no-op when already initialized)
       await useP2pEngineStore.getState().fetch()
-      if (!cancelled) setReconnecting(false)
+      if (!cancelled) {
+        setReconnecting(false)
+        // Load current LLM config for editing
+        if (!cfgLoaded) {
+          try {
+            const providerState = await loadTeamProviderFormState(workspacePath)
+            if (providerState) {
+              setCfgHostLlm(providerState.enabled)
+              setCfgLlmUrl(providerState.baseUrl)
+              setCfgLlmModels(providerState.models)
+            } else {
+              const status = await tauriInvoke<{ active: boolean; llm?: { baseUrl: string; model?: string; modelName?: string; models?: Array<{ id: string; name: string }> } }>('get_team_status', { workspacePath })
+              if (status.llm?.baseUrl) {
+                setCfgHostLlm(true)
+                setCfgLlmUrl(status.llm.baseUrl)
+                if (status.llm.models?.length) {
+                  setCfgLlmModels(status.llm.models)
+                } else if (status.llm.model) {
+                  setCfgLlmModels([{ id: status.llm.model, name: status.llm.modelName || status.llm.model }])
+                }
+              }
+            }
+          } catch { /* ignore */ }
+          setCfgLoaded(true)
+        }
+      }
     })()
     return () => { cancelled = true }
   }, [engineInit, loadSyncStatus, workspacePath])
@@ -235,9 +280,9 @@ export function TeamP2PConfig() {
       await tauriInvoke('p2p_join_drive', {
         ticket: ticket.trim(),
         label: '',
-        llmBaseUrl: buildConfig.team.llm.baseUrl || null,
-        llmModel: buildConfig.team.llm.model || null,
-        llmModelName: buildConfig.team.llm.modelName || null,
+        llmBaseUrl: null,
+        llmModel: null,
+        llmModelName: null,
       })
       setJoinTicketInput('')
       setSeedUrl('')
@@ -315,10 +360,18 @@ export function TeamP2PConfig() {
         teamName: createTeamName.trim() || null,
         ownerName: createOwnerName.trim() || null,
         ownerEmail: createOwnerEmail.trim() || null,
-        llmBaseUrl: buildConfig.team.llm.baseUrl || null,
-        llmModel: buildConfig.team.llm.model || null,
-        llmModelName: buildConfig.team.llm.modelName || null,
+        llmBaseUrl: createHostLlm ? (createLlmUrl || null) : null,
+        llmModel: createHostLlm ? (createLlmModels[0]?.id || null) : null,
+        llmModelName: createHostLlm ? (createLlmModels[0]?.name || null) : null,
+        llmModels: createHostLlm && createLlmModels.length > 0 ? JSON.stringify(createLlmModels) : null,
       })
+      if (workspacePath) {
+        await saveTeamProviderFile(
+          workspacePath,
+          buildTeamProviderConfig(createHostLlm, createLlmUrl, createLlmModels),
+          createHostLlm ? createLlmModels[0]?.id : undefined,
+        )
+      }
       await loadSyncStatus()
       useWorkspaceStore.getState().refreshFileTree()
       if (workspacePath) {
@@ -368,6 +421,33 @@ export function TeamP2PConfig() {
       setP2pError(err instanceof Error ? err.message : String(err))
     } finally {
       setCreateLoading(false)
+    }
+  }
+
+  const handleSaveLlmConfig = async () => {
+    setCfgSaving(true)
+    setP2pError(null)
+    try {
+      await tauriInvoke('update_team_llm_config', {
+        llmBaseUrl: cfgHostLlm ? (cfgLlmUrl || null) : null,
+        llmModel: cfgHostLlm ? (cfgLlmModels[0]?.id || null) : null,
+        llmModelName: cfgHostLlm ? (cfgLlmModels[0]?.name || null) : null,
+        llmModels: cfgHostLlm && cfgLlmModels.length > 0 ? JSON.stringify(cfgLlmModels) : null,
+        workspacePath,
+      })
+      if (workspacePath) {
+        const providerConfig = buildTeamProviderConfig(cfgHostLlm, cfgLlmUrl, cfgLlmModels)
+        if (providerConfig) {
+          await saveTeamProviderFile(workspacePath, providerConfig, cfgLlmModels[0]?.id)
+        } else if (!cfgHostLlm) {
+          // Owner / manager explicitly turned off the team's shared LLM.
+          await removeTeamProviderFile(workspacePath)
+        }
+      }
+    } catch (err) {
+      setP2pError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setCfgSaving(false)
     }
   }
 
@@ -584,6 +664,40 @@ export function TeamP2PConfig() {
               )}
             </div>
           </SettingCard>
+
+          {/* LLM Service Config — owner / manager only */}
+          {canManageServiceConfig && (
+            <SettingCard>
+              <div className="space-y-3">
+                <div className="flex items-center gap-3">
+                  <div className="h-9 w-9 rounded-lg flex items-center justify-center bg-slate-100 dark:bg-slate-900/30">
+                    <Settings className="h-5 w-5 text-slate-700 dark:text-slate-400" />
+                  </div>
+                  <div>
+                    <p className="text-sm font-medium">{t('settings.team.serviceConfig', 'Service Config')}</p>
+                    <p className="text-xs text-muted-foreground">{t('settings.team.serviceConfigDesc', 'LLM hosting settings for this team')}</p>
+                  </div>
+                </div>
+                <HostLlmConfig
+                  enabled={cfgHostLlm}
+                  onEnabledChange={setCfgHostLlm}
+                  baseUrl={cfgLlmUrl}
+                  onBaseUrlChange={setCfgLlmUrl}
+                  models={cfgLlmModels}
+                  onModelsChange={setCfgLlmModels}
+                />
+                <Button
+                  size="sm"
+                  className="gap-1.5"
+                  onClick={handleSaveLlmConfig}
+                  disabled={cfgSaving}
+                >
+                  {cfgSaving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+                  {cfgSaving ? t('common.saving', 'Saving...') : t('common.save', 'Save')}
+                </Button>
+              </div>
+            </SettingCard>
+          )}
 
           {/* Share Info Card (all members can generate tickets) */}
           {(syncStatus?.namespaceId || docTicket) && (
@@ -870,8 +984,8 @@ export function TeamP2PConfig() {
         </>
       )}
 
-      {/* ─── Reconnecting State (initial load) ─────────────────────────── */}
-      {!isConnected && reconnecting && (
+      {/* ─── Reconnecting State (initial load, only when P2P was configured) ── */}
+      {!isConnected && reconnecting && configuredAsP2p && (
         <SettingCard>
           <div className="flex items-center gap-3 py-4 justify-center">
             <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
@@ -924,100 +1038,83 @@ export function TeamP2PConfig() {
       )}
 
       {/* ─── Not Connected State ─────────────────────────────────────── */}
-      {!isConnected && !reconnecting && !configuredAsP2p && (
+      {!isConnected && !configuredAsP2p && (
         <>
           {/* Create Team */}
           <SettingCard>
             <div className="space-y-4">
-              <div className="flex items-center gap-3">
-                <div className="h-9 w-9 rounded-lg flex items-center justify-center bg-violet-100 dark:bg-violet-900/30">
-                  <Share2 className="h-5 w-5 text-violet-700 dark:text-violet-400" />
-                </div>
-                <div>
-                  <p className="text-sm font-medium">{t('settings.team.createTeam', 'Create Team')}</p>
-                  <p className="text-xs text-muted-foreground">{t('settings.team.createTeamDesc', 'Start a new team and get an invite code to share')}</p>
-                </div>
+              <div className="flex items-center gap-3 mb-1">
+                <Share2 className="h-4 w-4 text-muted-foreground" />
+                <h4 className="text-sm font-semibold text-foreground/90">{t('settings.team.createTeam', 'Create Team')}</h4>
               </div>
-
-              {!showCreateForm ? (
-                <Button onClick={() => setShowCreateForm(true)} className="gap-2">
-                  <Share2 className="h-4 w-4" />
-                  {t('settings.team.createTeamDrive', 'Create Team')}
-                </Button>
-              ) : (
-                <div className="space-y-3">
-                  <Input
-                    value={createTeamName}
-                    onChange={(e) => setCreateTeamName(e.target.value)}
-                    placeholder={t('settings.team.teamNamePlaceholder', 'Team name *')}
-                    className="h-9 text-sm"
-                    disabled={createLoading}
-                    autoFocus
-                  />
-                  <Input
-                    value={createInviteCode}
-                    onChange={(e) => setCreateInviteCode(e.target.value)}
-                    placeholder={t('settings.team.inviteCodePlaceholder', 'Invite code * (members use this to join)')}
-                    className="h-9 text-sm"
-                    disabled={createLoading}
-                  />
+              <div className="space-y-3">
+                <Input
+                  value={createTeamName}
+                  onChange={(e) => setCreateTeamName(e.target.value)}
+                  placeholder={t('settings.team.teamNamePlaceholder', 'Team name *')}
+                  className="h-9 text-sm bg-background/50"
+                  disabled={createLoading}
+                />
+                <Input
+                  value={createInviteCode}
+                  onChange={(e) => setCreateInviteCode(e.target.value)}
+                  placeholder={t('settings.team.inviteCodePlaceholder', 'Invite code * (members use this to join)')}
+                  className="h-9 text-sm bg-background/50"
+                  disabled={createLoading}
+                />
+                <div className="grid grid-cols-2 gap-3">
                   <Input
                     value={createOwnerName}
                     onChange={(e) => setCreateOwnerName(e.target.value)}
                     placeholder={t('settings.team.ownerNamePlaceholder', 'Contact name (optional)')}
-                    className="h-9 text-sm"
+                    className="h-9 text-sm bg-background/50"
                     disabled={createLoading}
                   />
                   <Input
                     value={createOwnerEmail}
                     onChange={(e) => setCreateOwnerEmail(e.target.value)}
                     placeholder={t('settings.team.ownerEmailPlaceholder', 'Contact email (optional)')}
-                    className="h-9 text-sm"
+                    className="h-9 text-sm bg-background/50"
                     disabled={createLoading}
                   />
-                  <div className="flex gap-2">
-                    <Button
-                      onClick={handleCreateTeam}
-                      disabled={createLoading || !createTeamName.trim() || !createInviteCode.trim()}
-                      className="gap-2"
-                    >
-                      {createLoading ? (
-                        <>
-                          <Loader2 className="h-4 w-4 animate-spin" />
-                          {t('settings.team.creating', 'Creating...')}
-                        </>
-                      ) : (
-                        <>
-                          <Share2 className="h-4 w-4" />
-                          {t('settings.team.createTeamDrive', 'Create Team')}
-                        </>
-                      )}
-                    </Button>
-                    <Button variant="outline" onClick={() => setShowCreateForm(false)} disabled={createLoading}>
-                      {t('common.cancel', 'Cancel')}
-                    </Button>
-                  </div>
                 </div>
-              )}
+                <HostLlmConfig
+                  enabled={createHostLlm}
+                  onEnabledChange={setCreateHostLlm}
+                  baseUrl={createLlmUrl}
+                  onBaseUrlChange={setCreateLlmUrl}
+                  models={createLlmModels}
+                  onModelsChange={setCreateLlmModels}
+                  disabled={createLoading}
+                />
+                <Button
+                  onClick={handleCreateTeam}
+                  disabled={createLoading || !createTeamName.trim() || !createInviteCode.trim()}
+                  className="w-full gap-2"
+                >
+                  {createLoading ? (
+                    <><Loader2 className="h-4 w-4 animate-spin" />{t('settings.team.creating', 'Creating...')}</>
+                  ) : (
+                    <><Share2 className="h-4 w-4" />{t('settings.team.createTeamDrive', 'Create Team')}</>
+                  )}
+                </Button>
+              </div>
             </div>
           </SettingCard>
+
+          <div className="relative flex items-center py-1">
+            <div className="flex-1 border-t border-border/40" />
+            <span className="px-3 text-xs text-muted-foreground">{t('common.or', '或')}</span>
+            <div className="flex-1 border-t border-border/40" />
+          </div>
 
           {/* Join Team */}
           <SettingCard>
             <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <div className="h-9 w-9 rounded-lg flex items-center justify-center bg-blue-100 dark:bg-blue-900/30">
-                    <Link className="h-5 w-5 text-blue-700 dark:text-blue-400" />
-                  </div>
-                  <div>
-                    <p className="text-sm font-medium">{t('settings.team.p2pJoinTitle', 'Join Team')}</p>
-                    <p className="text-xs text-muted-foreground">
-                      {joinMode === 'seed'
-                        ? t('settings.team.p2pJoinSeedDesc', 'Internet — join with Team ID + invite code')
-                        : t('settings.team.p2pJoinDesc', 'Local network — join directly with a ticket')}
-                    </p>
-                  </div>
+              <div className="flex items-center justify-between mb-1">
+                <div className="flex items-center gap-2">
+                  <Link className="h-4 w-4 text-muted-foreground" />
+                  <h4 className="text-sm font-semibold text-foreground/90">{t('settings.team.p2pJoinTitle', 'Join Team')}</h4>
                 </div>
                 {/* Mode toggle */}
                 <button

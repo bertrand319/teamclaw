@@ -30,6 +30,8 @@ import { TiptapToolbar } from "./TiptapToolbar";
 import { TableBubbleMenu } from "./TableBubbleMenu";
 import { TiptapSearchBar } from "./TiptapSearchBar";
 import { AgentHighlight, agentHighlightKey } from "./AgentHighlight";
+import { WikiLinkExtension } from "./extensions/WikiLinkExtension";
+import { createWikiLinkSuggestion } from "./extensions/WikiLinkSuggestion";
 import { computeAgentChanges } from "./pm-diff-engine";
 import type { AgentHighlightMeta } from "./AgentHighlight";
 
@@ -89,6 +91,7 @@ export const TiptapMarkdownEditor = forwardRef<TiptapEditorHandle, EditorProps>(
       TableCell,
       TableHeader,
       AgentHighlight,
+      WikiLinkExtension.configure({ suggestion: createWikiLinkSuggestion() }),
     ], []);
 
     const baseExtensions = useTiptapExtensions({

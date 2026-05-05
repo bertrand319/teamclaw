@@ -33,7 +33,6 @@ import {
 } from "@/packages/ai/model-selector";
 import { Button } from "@/components/ui/button";
 import { FileInputButton } from "./FileInputButton";
-import { MessageQueueDisplay } from "./MessageQueueDisplay";
 import { ContextUsageBadge } from "./ContextUsageBadge";
 import { type QueuedMessage, useSessionStore } from "@/stores/session";
 import { useVoiceInputStore } from "@/stores/voice-input";
@@ -79,7 +78,7 @@ function CommandPopoverWrapper({
 }) {
   const insertSkillMention = useInsertSkillMention();
 
-  const handleSelect = React.useCallback((command: OpenCodeCommand & { _type?: 'skill' | 'command' }) => {
+  const handleSelect = React.useCallback((command: OpenCodeCommand & { _type?: 'role' | 'skill' | 'command' }) => {
     console.log('[CommandPopoverWrapper] 🎯 handleSelect called, command:', command.name, 'type:', command._type);
     const type = command._type || 'skill'; // Default to skill for backward compatibility
     insertSkillMention(command.name, type);
@@ -135,8 +134,8 @@ export function ChatInputArea({
   onSubmit,
   isStreaming,
   onAbort,
-  messageQueue,
-  onRemoveFromQueue,
+  messageQueue: _messageQueue,
+  onRemoveFromQueue: _onRemoveFromQueue,
   onHeightChange,
   headerContent,
 }: ChatInputAreaProps) {
@@ -155,6 +154,9 @@ export function ChatInputArea({
 
   // Team mode
   const teamMode = useTeamModeStore(s => s.teamMode);
+  const teamModelConfig = useTeamModeStore(s => s.teamModelConfig);
+  const teamModelOptions = useTeamModeStore(s => s.teamModelOptions);
+  const switchTeamModel = useTeamModeStore(s => s.switchTeamModel);
   const devUnlocked = useTeamModeStore(s => s.devUnlocked);
   const advancedMode = useUIStore((s) => s.advancedMode);
   const canShowPlanToggle = advancedMode && devUnlocked;
@@ -246,47 +248,47 @@ export function ChatInputArea({
         "z-10",
         compact
           ? "absolute bottom-0 left-0 right-0 px-2 pb-2 pt-2 bg-background"
-          : "absolute bottom-0 left-0 right-0 px-4 pb-6 pt-8 bg-gradient-to-t from-background from-70% to-transparent",
+          : "absolute bottom-0 left-0 right-0 px-4 pb-6 pt-8",
       )}
     >
-      <div className={cn("w-full", compact ? "" : "mx-auto max-w-3xl")}>
+      <div className={cn("relative w-full", compact ? "" : "mx-auto max-w-3xl")}>
         {/* Permission & Error UI (rendered above input so it's visible) */}
         {headerContent}
 
-        {/* Message Queue Display */}
-        {!compact && (
-          <MessageQueueDisplay
-            queue={messageQueue}
-            onRemove={onRemoveFromQueue}
-          />
-        )}
+        <div className="relative">
+          {!compact ? (
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute left-[-1px] right-[-1px] top-0 bottom-[-1.75rem] bg-background"
+            />
+          ) : null}
 
-        <PromptInput
-          data-onboarding-id="chat-input-root"
-          value={inputValue}
-          onValueChange={onInputChange}
-          onSubmit={handleSubmit}
-          onFilesChange={handlePastedFiles}
-          onFilePathsDrop={handleFilePathsDrop}
-          onMentionTrigger={(query) => {
-            setMentionSearchQuery(query);
-            setMentionPopoverOpen(true);
-          }}
-          onMentionClose={() => {
-            setMentionPopoverOpen(false);
-            setMentionSearchQuery("");
-          }}
-          onCommandTrigger={(query) => {
-            setCommandSearchQuery(query);
-            setCommandPopoverOpen(true);
-          }}
-          onCommandClose={() => {
-            setCommandPopoverOpen(false);
-            setCommandSearchQuery("");
-          }}
-          multiple
-          className="bg-card shadow-lg"
-        >
+          <PromptInput
+            data-onboarding-id="chat-input-root"
+            value={inputValue}
+            onValueChange={onInputChange}
+            onSubmit={handleSubmit}
+            onFilesChange={handlePastedFiles}
+            onFilePathsDrop={handleFilePathsDrop}
+            onMentionTrigger={(query) => {
+              setMentionSearchQuery(query);
+              setMentionPopoverOpen(true);
+            }}
+            onMentionClose={() => {
+              setMentionPopoverOpen(false);
+              setMentionSearchQuery("");
+            }}
+            onCommandTrigger={(query) => {
+              setCommandSearchQuery(query);
+              setCommandPopoverOpen(true);
+            }}
+            onCommandClose={() => {
+              setCommandPopoverOpen(false);
+              setCommandSearchQuery("");
+            }}
+            multiple
+            className="relative z-10 bg-card shadow-lg"
+          >
           {/* Image previews */}
           {imageFiles.length > 0 && (
             <div className="flex flex-wrap gap-2 px-4 pt-3 pb-2">
@@ -429,7 +431,43 @@ export function ChatInputArea({
                 </Button>
               )}
 
-              {(!teamMode || devUnlocked) && (
+              {teamMode && teamModelConfig && !devUnlocked && teamModelOptions.length > 1 ? (
+                <ModelSelector
+                  open={modelSelectorOpen}
+                  onOpenChange={setModelSelectorOpen}
+                >
+                  <ModelSelectorTrigger asChild>
+                    <PromptInputButton>
+                      <ModelSelectorLogo provider="team" />
+                      {teamModelConfig.modelName}
+                    </PromptInputButton>
+                  </ModelSelectorTrigger>
+                  <ModelSelectorContent align="start">
+                    <ModelSelectorList>
+                      <ModelSelectorGroup heading="Team">
+                        {teamModelOptions.map((option) => (
+                          <ModelSelectorItem
+                            key={option.id}
+                            onSelect={() => {
+                              setModelSelectorOpen(false);
+                              const wsPath = useWorkspaceStore.getState().workspacePath;
+                              if (wsPath) switchTeamModel(option.id, wsPath);
+                            }}
+                          >
+                            <ModelSelectorLogo provider="team" />
+                            <ModelSelectorName>{option.name}</ModelSelectorName>
+                          </ModelSelectorItem>
+                        ))}
+                      </ModelSelectorGroup>
+                    </ModelSelectorList>
+                  </ModelSelectorContent>
+                </ModelSelector>
+              ) : teamMode && teamModelConfig && !devUnlocked ? (
+                <PromptInputButton>
+                  <ModelSelectorLogo provider="team" />
+                  {teamModelConfig.modelName}
+                </PromptInputButton>
+              ) : (
                 <ModelSelector
                   open={modelSelectorOpen}
                   onOpenChange={setModelSelectorOpen}
@@ -509,7 +547,8 @@ export function ChatInputArea({
               />
             </div>
           </PromptInputFooter>
-        </PromptInput>
+          </PromptInput>
+        </div>
       </div>
     </div>
   );

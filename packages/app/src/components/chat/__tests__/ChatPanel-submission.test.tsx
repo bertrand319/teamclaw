@@ -13,6 +13,8 @@ const mockClearSessionError = vi.fn();
 const mockSetError = vi.fn();
 const mockSetDraftInput = vi.fn();
 const mockSetSelectedModel = vi.fn();
+const mockAnswerQuestion = vi.fn(() => Promise.resolve());
+const mockSkipQuestion = vi.fn(() => Promise.resolve());
 const workspaceState = {
   workspacePath: '/test',
   openCodeBootstrapped: true,
@@ -29,6 +31,19 @@ const mockSessionState = {
   sessionError: null,
   inactivityWarning: false,
   draftInput: '',
+  pendingPermissions: [] as Array<unknown>,
+  pendingQuestions: [] as Array<{
+    questionId: string;
+    toolCallId: string;
+    messageId: string;
+    questions: Array<{
+      id?: string;
+      header?: string;
+      question: string;
+      options: Array<{ label: string; value?: string }>;
+    }>;
+  }>,
+  todos: [] as Array<unknown>,
   sessions: [
     {
       id: 'sess-1',
@@ -47,6 +62,8 @@ const mockSessionState = {
   setError: mockSetError,
   setSelectedModel: mockSetSelectedModel,
   setDraftInput: mockSetDraftInput,
+  answerQuestion: mockAnswerQuestion,
+  skipQuestion: mockSkipQuestion,
   pollPermissions: vi.fn(),
 };
 
@@ -102,9 +119,30 @@ vi.mock('@/stores/suggestions', () => ({
     selector({ customSuggestions: [] }),
 }));
 
+vi.mock('@/hooks/useAppInit', () => ({
+  SKILLS_CHANGED_EVENT: 'skills-files-changed',
+}));
+
+vi.mock('@/stores/shortcuts', () => ({
+  useShortcutsStore: Object.assign(
+    (selector: (s: unknown) => unknown) =>
+      selector({ setTeamNodes: vi.fn() }),
+    {
+      getState: () => ({
+        setTeamNodes: vi.fn(),
+      }),
+    },
+  ),
+}));
+
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
-    t: (_key: string, fallback?: string) => fallback ?? _key,
+    t: (key: string, fallback?: string, options?: Record<string, unknown>) => {
+      const template = fallback ?? key;
+      return template.replace(/\{\{(\w+)\}\}/g, (_, token: string) =>
+        String(options?.[token] ?? `{{${token}}}`),
+      );
+    },
   }),
 }));
 
@@ -145,7 +183,12 @@ vi.mock('../SessionErrorAlert', () => ({
 }));
 
 vi.mock('../PermissionCard', () => ({
-  PendingPermissionInline: () => null,
+  PendingPermissionInline: () =>
+    mockSessionState.pendingPermissions.length > 0
+      ? React.createElement('div', { 'data-testid': 'pending-permission-inline' }, 'permissions')
+      : null,
+  hasVisiblePendingPermissions: (_activeSessionId: string | null, _sessions: unknown[], pendingPermissions: unknown[]) =>
+    pendingPermissions.length > 0,
 }));
 
 vi.mock('../ChatInputArea', () => ({
@@ -218,8 +261,13 @@ describe('ChatPanel submission flow', () => {
     mockSessionState.activeSessionId = 'sess-1';
     mockSessionState.error = null;
     mockSessionState.isConnected = true;
+    mockSessionState.messageQueue = [];
     mockSessionState.sessionError = null;
     mockSessionState.draftInput = '';
+    mockSessionState.pendingPermissions = [];
+    mockSessionState.pendingQuestions = [];
+    mockSessionState.todos = [];
+    mockSkipQuestion.mockClear();
     mockSessionState.sessions = [
       {
         id: 'sess-1',
@@ -288,7 +336,7 @@ describe('ChatPanel submission flow', () => {
     });
 
     it('preserves namespaced skill mentions in submitted content', async () => {
-      mockSessionState.draftInput = '/{superpowers/brainstorming}';
+      mockSessionState.draftInput = '/{skill:superpowers/brainstorming}';
 
       const { ChatPanel } = await import('../ChatPanel');
       render(React.createElement(ChatPanel));
@@ -298,7 +346,29 @@ describe('ChatPanel submission flow', () => {
         fireEvent.click(submitBtn);
       });
 
-      expect(mockSendMessage).toHaveBeenCalledWith('[Skill: superpowers/brainstorming]', undefined, undefined);
+      expect(mockSendMessage).toHaveBeenCalledWith(
+        '[Skill: superpowers/brainstorming|instruction:You must call skill({ name: "superpowers/brainstorming" }) before any other action.]',
+        undefined,
+        undefined,
+      );
+    });
+
+    it('serializes role mentions into role directives on submit', async () => {
+      mockSessionState.draftInput = '/{role:accounting-dimensions}';
+
+      const { ChatPanel } = await import('../ChatPanel');
+      render(React.createElement(ChatPanel));
+
+      const submitBtn = screen.getByTestId('mock-submit');
+      await act(async () => {
+        fireEvent.click(submitBtn);
+      });
+
+      expect(mockSendMessage).toHaveBeenCalledWith(
+        '[Role: accounting-dimensions|instruction:You must call role_load({ name: "accounting-dimensions" }) before any other action.]',
+        undefined,
+        undefined,
+      );
     });
   });
 
@@ -316,14 +386,14 @@ describe('ChatPanel submission flow', () => {
   });
 
   describe('connection status', () => {
-    it('shows connecting indicator when disconnected with active session', async () => {
+    it('does not show a connection indicator in the message area when disconnected', async () => {
       mockSessionState.isConnected = false;
       mockSessionState.activeSessionId = 'sess-1';
 
       const { ChatPanel } = await import('../ChatPanel');
       render(React.createElement(ChatPanel));
 
-      expect(screen.getByText('Connecting...')).toBeDefined();
+      expect(screen.queryByText('Connecting...')).toBeNull();
     });
 
     it('does not show connecting indicator when connected', async () => {
@@ -333,6 +403,253 @@ describe('ChatPanel submission flow', () => {
       render(React.createElement(ChatPanel));
 
       expect(screen.queryByText('Connecting...')).toBeNull();
+    });
+  });
+
+  describe('inline todo dock', () => {
+    it('renders inline todo panel above the input when no approval is pending', async () => {
+      mockSessionState.todos = [
+        { id: 'todo-1', content: 'Inspect parser config', status: 'in_progress', priority: 'high' },
+        { id: 'todo-2', content: 'Verify markdown rendering', status: 'pending', priority: 'medium' },
+      ];
+
+      const { ChatPanel } = await import('../ChatPanel');
+      render(React.createElement(ChatPanel));
+
+      expect(screen.getByTestId('todo-list-inline')).toBeTruthy();
+      expect(screen.queryByTestId('pending-permission-inline')).toBeNull();
+    });
+
+    it('hides inline todo panel when a permission card is occupying the dock', async () => {
+      mockSessionState.todos = [
+        { id: 'todo-1', content: 'Inspect parser config', status: 'in_progress', priority: 'high' },
+      ];
+      mockSessionState.pendingPermissions = [{ permission: { id: 'perm-1' } }];
+
+      const { ChatPanel } = await import('../ChatPanel');
+      render(React.createElement(ChatPanel));
+
+      expect(screen.queryByTestId('todo-list-inline')).toBeNull();
+      expect(screen.getByTestId('pending-permission-inline')).toBeTruthy();
+    });
+
+    it('renders a unified dock when todos and message queue are both present', async () => {
+      mockSessionState.todos = [
+        { id: 'todo-1', content: 'Inspect parser config', status: 'in_progress', priority: 'high' },
+      ];
+      mockSessionState.messageQueue = [
+        { id: 'queued-1', content: 'run follow-up check', timestamp: new Date() },
+      ];
+
+      const { ChatPanel } = await import('../ChatPanel');
+      render(React.createElement(ChatPanel));
+
+      expect(screen.getByTestId('todo-list-inline')).toBeTruthy();
+      expect(screen.getByTestId('todo-list-inline-queue').textContent).toContain('1 messages queued');
+      expect(screen.getByText('Inspect parser config')).toBeTruthy();
+    });
+
+    it('renders the unified dock in queue-only mode when there are no todos', async () => {
+      mockSessionState.messageQueue = [
+        { id: 'queued-1', content: 'run follow-up check', timestamp: new Date() },
+      ];
+
+      const { ChatPanel } = await import('../ChatPanel');
+      render(React.createElement(ChatPanel));
+
+      expect(screen.getByTestId('todo-list-inline')).toBeTruthy();
+      expect(screen.getByTestId('todo-list-inline-queue').textContent).toContain('1 messages queued');
+      expect(screen.getByText('run follow-up check')).toBeTruthy();
+    });
+
+    it('hides the unified dock when approval is occupying the dock, even if queue exists', async () => {
+      mockSessionState.todos = [
+        { id: 'todo-1', content: 'Inspect parser config', status: 'in_progress', priority: 'high' },
+      ];
+      mockSessionState.messageQueue = [
+        { id: 'queued-1', content: 'run follow-up check', timestamp: new Date() },
+      ];
+      mockSessionState.pendingPermissions = [{ permission: { id: 'perm-1' } }];
+
+      const { ChatPanel } = await import('../ChatPanel');
+      render(React.createElement(ChatPanel));
+
+      expect(screen.queryByTestId('todo-list-inline')).toBeNull();
+      expect(screen.getByTestId('pending-permission-inline')).toBeTruthy();
+      expect(screen.queryByText('1 messages queued')).toBeNull();
+    });
+  });
+
+  describe('question input takeover', () => {
+    it('replaces the whole input dock when a question is pending', async () => {
+      mockSessionState.todos = [
+        { id: 'todo-1', content: 'Inspect parser config', status: 'in_progress', priority: 'high' },
+      ];
+      mockSessionState.messageQueue = [
+        { id: 'queued-1', content: 'run follow-up check', timestamp: new Date() },
+      ];
+      mockSessionState.pendingPermissions = [{ permission: { id: 'perm-1' } }];
+      mockSessionState.pendingQuestions = [
+        {
+          questionId: 'question-event-1',
+          toolCallId: 'tool-call-1',
+          messageId: 'message-1',
+          questions: [
+            {
+              id: 'q-1',
+              header: '下一步',
+              question: '你希望我接下来做什么？',
+              options: [
+                { label: '继续测试', value: 'continue' },
+                { label: '结束即可', value: 'finish' },
+              ],
+            },
+          ],
+        },
+      ];
+
+      const { ChatPanel } = await import('../ChatPanel');
+      render(React.createElement(ChatPanel));
+
+      expect(screen.queryByTestId('chat-input-area')).toBeNull();
+      expect(screen.queryByTestId('todo-list-inline')).toBeNull();
+      expect(screen.queryByTestId('pending-permission-inline')).toBeNull();
+      expect(screen.queryByText('1 messages queued')).toBeNull();
+      expect(screen.getByTestId('question-input-dock')).toBeTruthy();
+      expect(screen.getByText('你希望我接下来做什么？')).toBeTruthy();
+      expect(screen.getByText('继续测试')).toBeTruthy();
+    });
+
+    it('renders a child session question dock while viewing the parent session', async () => {
+      mockSessionState.activeSessionId = 'parent-1';
+      mockSessionState.sessions = [
+        {
+          id: 'parent-1',
+          title: 'Parent session',
+          messages: [],
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
+        {
+          id: 'child-1',
+          title: 'Child session',
+          parentID: 'parent-1',
+          messages: [],
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
+      ];
+      mockSessionState.pendingQuestions = [
+        {
+          questionId: 'question-event-child',
+          toolCallId: 'tool-call-child',
+          messageId: 'message-child',
+          sessionId: 'child-1',
+          questions: [
+            {
+              id: 'q-1',
+              header: '子任务确认',
+              question: '子任务需要你确认什么？',
+              options: [{ label: '继续', value: 'continue' }],
+            },
+          ],
+        },
+      ];
+
+      const { ChatPanel } = await import('../ChatPanel');
+      render(React.createElement(ChatPanel));
+
+      expect(screen.queryByTestId('chat-input-area')).toBeNull();
+      expect(screen.getByTestId('question-input-dock')).toBeTruthy();
+      expect(screen.getByText('子任务需要你确认什么？')).toBeTruthy();
+    });
+
+    it('skips the active question from the question dock', async () => {
+      mockSessionState.pendingQuestions = [
+        {
+          questionId: 'question-event-1',
+          toolCallId: 'tool-call-1',
+          messageId: 'message-1',
+          questions: [
+            {
+              id: 'q-1',
+              header: '下一步',
+              question: '你希望我接下来做什么？',
+              options: [
+                { label: '继续测试', value: 'continue' },
+                { label: '结束即可', value: 'finish' },
+              ],
+            },
+          ],
+        },
+      ];
+
+      const { ChatPanel } = await import('../ChatPanel');
+      render(React.createElement(ChatPanel));
+
+      fireEvent.click(screen.getByRole('button', { name: /skip/i }));
+
+      await waitFor(() => {
+        expect(mockSkipQuestion).toHaveBeenCalledWith('question-event-1');
+      });
+    });
+
+    it('advances to the next question after selecting a preset answer', async () => {
+      mockSessionState.pendingQuestions = [
+        {
+          questionId: 'question-event-1',
+          toolCallId: 'tool-call-1',
+          messageId: 'message-1',
+          questions: [
+            {
+              id: 'q-1',
+              header: '第一题',
+              question: '先做什么？',
+              options: [{ label: '先看全局', value: 'overview' }],
+            },
+            {
+              id: 'q-2',
+              header: '第二题',
+              question: '然后做什么？',
+              options: [{ label: '继续推进', value: 'continue' }],
+            },
+          ],
+        },
+      ];
+
+      const { ChatPanel } = await import('../ChatPanel');
+      render(React.createElement(ChatPanel));
+
+      fireEvent.click(screen.getByRole('button', { name: /先看全局/i }));
+
+      expect(screen.getByText('然后做什么？')).toBeTruthy();
+      expect(mockAnswerQuestion).not.toHaveBeenCalled();
+    });
+
+    it('selects the last preset answer without auto-submitting', async () => {
+      mockSessionState.pendingQuestions = [
+        {
+          questionId: 'question-event-1',
+          toolCallId: 'tool-call-1',
+          messageId: 'message-1',
+          questions: [
+            {
+              id: 'q-1',
+              header: '唯一问题',
+              question: '最后怎么做？',
+              options: [{ label: '结束即可', value: 'finish' }],
+            },
+          ],
+        },
+      ];
+
+      const { ChatPanel } = await import('../ChatPanel');
+      render(React.createElement(ChatPanel));
+
+      fireEvent.click(screen.getByRole('button', { name: /结束即可/i }));
+
+      expect(screen.getByText('最后怎么做？')).toBeTruthy();
+      expect(mockAnswerQuestion).not.toHaveBeenCalled();
     });
   });
 

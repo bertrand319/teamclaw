@@ -134,7 +134,11 @@ const MIN_PASSWORD_LEN: usize = 8;
 
 // --- Config I/O ---
 
-pub fn read_webdav_config(workspace_path: &str, teamclaw_dir: &str, config_file_name: &str) -> Option<WebDavConfig> {
+pub fn read_webdav_config(
+    workspace_path: &str,
+    teamclaw_dir: &str,
+    config_file_name: &str,
+) -> Option<WebDavConfig> {
     let config_path = Path::new(workspace_path)
         .join(teamclaw_dir)
         .join(config_file_name);
@@ -144,7 +148,12 @@ pub fn read_webdav_config(workspace_path: &str, teamclaw_dir: &str, config_file_
     serde_json::from_value(webdav_value.clone()).ok()
 }
 
-pub fn write_webdav_config(workspace_path: &str, config: &WebDavConfig, teamclaw_dir: &str, config_file_name: &str) -> Result<(), String> {
+pub fn write_webdav_config(
+    workspace_path: &str,
+    config: &WebDavConfig,
+    teamclaw_dir: &str,
+    config_file_name: &str,
+) -> Result<(), String> {
     let tc_dir = Path::new(workspace_path).join(teamclaw_dir);
     fs::create_dir_all(&tc_dir)
         .map_err(|e| format!("Failed to create {} dir: {e}", teamclaw_dir))?;
@@ -178,7 +187,11 @@ pub fn read_sync_manifest(workspace_path: &str, teamclaw_dir: &str) -> Option<Sy
     serde_json::from_str(&content).ok()
 }
 
-pub fn write_sync_manifest(workspace_path: &str, manifest: &SyncManifest, teamclaw_dir: &str) -> Result<(), String> {
+pub fn write_sync_manifest(
+    workspace_path: &str,
+    manifest: &SyncManifest,
+    teamclaw_dir: &str,
+) -> Result<(), String> {
     let tc_dir = Path::new(workspace_path).join(teamclaw_dir);
     fs::create_dir_all(&tc_dir)
         .map_err(|e| format!("Failed to create {} dir: {e}", teamclaw_dir))?;
@@ -605,8 +618,8 @@ pub fn encrypt_config(payload: &ExportPayload, password: &str) -> Result<String,
     let export = serde_json::json!({
         "type": "teamclaw-team-webdav",
         "version": 1,
-        "salt": BASE64.encode(&salt),
-        "nonce": BASE64.encode(&nonce_bytes),
+        "salt": BASE64.encode(salt),
+        "nonce": BASE64.encode(nonce_bytes),
         "ciphertext": BASE64.encode(&ciphertext),
     });
 
@@ -646,6 +659,7 @@ pub fn decrypt_config(encrypted_json: &str, password: &str) -> Result<ExportPayl
 
 // --- Background Sync Timer ---
 
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_sync_timer(
     client: Client,
     url: String,
@@ -662,12 +676,33 @@ pub fn spawn_sync_timer(
         let mut current_interval = base_interval;
         let max_interval = Duration::from_secs(3600);
 
-        let _ = do_background_sync(&client, &url, &auth, &workspace_path, &syncing, &team_repo_dir, &teamclaw_dir, &config_file_name).await;
+        let _ = do_background_sync(
+            &client,
+            &url,
+            &auth,
+            &workspace_path,
+            &syncing,
+            &team_repo_dir,
+            &teamclaw_dir,
+            &config_file_name,
+        )
+        .await;
 
         loop {
             tokio::time::sleep(current_interval).await;
 
-            match do_background_sync(&client, &url, &auth, &workspace_path, &syncing, &team_repo_dir, &teamclaw_dir, &config_file_name).await {
+            match do_background_sync(
+                &client,
+                &url,
+                &auth,
+                &workspace_path,
+                &syncing,
+                &team_repo_dir,
+                &teamclaw_dir,
+                &config_file_name,
+            )
+            .await
+            {
                 Ok(_) => {
                     current_interval = base_interval;
                 }
@@ -683,6 +718,7 @@ pub fn spawn_sync_timer(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn do_background_sync(
     client: &Client,
     url: &str,
@@ -698,12 +734,21 @@ async fn do_background_sync(
     }
     syncing.store(true, Ordering::Relaxed);
 
-    let result = sync_from_webdav(client, url, auth, workspace_path, team_repo_dir, teamclaw_dir).await;
+    let result = sync_from_webdav(
+        client,
+        url,
+        auth,
+        workspace_path,
+        team_repo_dir,
+        teamclaw_dir,
+    )
+    .await;
 
     syncing.store(false, Ordering::Relaxed);
 
     if result.is_ok() {
-        if let Some(mut config) = read_webdav_config(workspace_path, teamclaw_dir, config_file_name) {
+        if let Some(mut config) = read_webdav_config(workspace_path, teamclaw_dir, config_file_name)
+        {
             config.last_sync_at = Some(chrono::Utc::now().to_rfc3339());
             let _ = write_webdav_config(workspace_path, &config, teamclaw_dir, config_file_name);
         }

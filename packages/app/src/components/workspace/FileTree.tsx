@@ -245,14 +245,28 @@ const VIRTUAL_SCROLL_THRESHOLD = 200;
 interface FileTreeProps {
   filterText?: string;
   gitChangedOnly?: boolean;
+  /** Override tree nodes (e.g. for custom root). When provided, bypasses workspace store's fileTree. */
+  nodes?: import('@/stores/workspace').FileNode[];
+  /** Suppress git status decorations */
+  hideGitStatus?: boolean;
+  /** When set, shows an InlineInput at the top of the tree for creating a file or folder at root level */
+  rootCreating?: 'file' | 'folder' | null;
+  onRootCreateConfirm?: (name: string) => void;
+  onRootCreateCancel?: () => void;
 }
 
 export function FileTree({
   filterText = "",
   gitChangedOnly = false,
+  nodes: nodesProp,
+  hideGitStatus = false,
+  rootCreating,
+  onRootCreateConfirm,
+  onRootCreateCancel,
 }: FileTreeProps) {
   const { t } = useTranslation();
-  const fileTree = useWorkspaceStore(s => s.fileTree);
+  const storeFileTree = useWorkspaceStore(s => s.fileTree);
+  const fileTree = nodesProp ?? storeFileTree;
   const expandedPaths = useWorkspaceStore(s => s.expandedPaths);
   const loadingPaths = useWorkspaceStore(s => s.loadingPaths);
   const selectedFile = useWorkspaceStore(s => s.selectedFile);
@@ -276,6 +290,7 @@ export function FileTree({
   const { gitStatuses } = useGitStatus();
   const { showGitStatus, showStatusIcons, statusColors } =
     useGitSettingsStore();
+  const effectiveShowGitStatus = hideGitStatus ? false : showGitStatus;
   const parentRef = useRef<HTMLDivElement>(null);
   const treeContainerRef = useRef<HTMLDivElement>(null);
 
@@ -311,7 +326,7 @@ export function FileTree({
 
   // Pre-compute git data
   const { fileGitStatusMap, dirtyDirectories } = useMemo(() => {
-    if (!showGitStatus) {
+    if (!effectiveShowGitStatus) {
       return {
         fileGitStatusMap: new Map<string, GitStatus>(),
         dirtyDirectories: new Set<string>(),
@@ -332,13 +347,20 @@ export function FileTree({
     });
 
     return { fileGitStatusMap: fileMap, dirtyDirectories: dirtyDirs };
-  }, [showGitStatus, gitStatuses, workspacePath]);
+  }, [effectiveShowGitStatus, gitStatuses, workspacePath]);
 
-  // Pre-compute sync status data for team files (merge OSS and P2P sources)
+  // Pre-compute sync status data for team files (merge OSS, P2P, and Git sources)
   const ossFileSyncStatusMap = useTeamOssStore(s => s.fileSyncStatusMap);
   const p2pFileSyncStatusMap = useTeamModeStore(s => s.p2pFileSyncStatusMap);
+  const teamGitFileSyncStatusMap = useTeamModeStore(s => s.teamGitFileSyncStatusMap);
   const p2pConnected = useTeamModeStore(s => s.p2pConnected);
-  const fileSyncStatusMap = p2pConnected ? p2pFileSyncStatusMap : ossFileSyncStatusMap;
+  const teamModeType = useTeamModeStore(s => s.teamModeType);
+  const teamGitSyncing = useTeamModeStore(s => s.teamGitSyncing);
+  const teamGitLastSyncAt = useTeamModeStore(s => s.teamGitLastSyncAt);
+  const fileSyncStatusMap =
+    teamModeType === 'git' ? teamGitFileSyncStatusMap :
+    p2pConnected           ? p2pFileSyncStatusMap     :
+                             ossFileSyncStatusMap;
   const syncDirtyDirectories = useMemo(() => {
     const dirtyDirs = new Map<string, 'synced' | 'modified' | 'new'>();
     if (!workspacePath) return dirtyDirs;
@@ -367,6 +389,16 @@ export function FileTree({
     }
     useWorkspaceStore.setState({ expandedPaths: nextExpanded });
   }, []);
+
+  const handleExpandDirectory = useCallback((path: string) => {
+    setFocusedPath(path);
+    expandDirectory(path);
+  }, [setFocusedPath, expandDirectory]);
+
+  const handleCollapseDirectory = useCallback((path: string) => {
+    setFocusedPath(path);
+    collapseDirectory(path);
+  }, [setFocusedPath, collapseDirectory]);
 
   // Context menu action handlers
   const handleNewFile = useCallback(
@@ -494,8 +526,8 @@ export function FileTree({
         const node = findNode(currentFileTree, filePath);
         const isDir = node?.type === "directory";
         // Backup content for undo (text files only)
-        if (!isDir) {
-          const content = await readFileContent(filePath);
+        if (!isDir && workspacePath) {
+          const content = await readFileContent(workspacePath, filePath);
           if (content !== undefined) {
             pushUndo({
               type: 'delete',
@@ -515,8 +547,8 @@ export function FileTree({
       }
     } else {
       // Backup for undo
-      if (!deleteConfirm.isDirectory) {
-        const content = await readFileContent(deleteConfirm.path);
+      if (!deleteConfirm.isDirectory && workspacePath) {
+        const content = await readFileContent(workspacePath, deleteConfirm.path);
         if (content !== undefined) {
           pushUndo({
             type: 'delete',
@@ -527,13 +559,13 @@ export function FileTree({
           });
         }
       }
-      const success = await deleteItem(deleteConfirm.path, deleteConfirm.isDirectory);
+      const success = await deleteItem(deleteConfirm.path, deleteConfirm.isDirectory, workspacePath ?? undefined);
       if (success) {
         await refreshFileTree();
       }
     }
     setDeleteConfirm(null);
-  }, [deleteConfirm, refreshFileTree, pushUndo]);
+  }, [deleteConfirm, refreshFileTree, pushUndo, workspacePath]);
 
   const handleCopyPath = useCallback((path: string) => {
     copyToClipboard(path);
@@ -1194,6 +1226,8 @@ export function FileTree({
     isRenaming: renamingPath === node.path,
     isDragOver: dragOverPath === node.path,
     isTeamClawTeam: node.name === TEAM_REPO_DIR && node.type === "directory" && level === 0,
+    teamSyncing: node.name === TEAM_REPO_DIR && node.type === "directory" && level === 0 ? teamGitSyncing : undefined,
+    teamLastSyncAt: node.name === TEAM_REPO_DIR && node.type === "directory" && level === 0 ? teamGitLastSyncAt : undefined,
     syncStatus: (() => {
       if (!node.path.includes(`/${TEAM_REPO_DIR}/`)) return null;
       if (node.type === 'directory') {
@@ -1208,8 +1242,8 @@ export function FileTree({
     onSelectFile: selectFile,
     onSelectFileRange: selectFileRange,
     onToggleFileSelection: toggleFileSelection,
-    onExpandDirectory: expandDirectory,
-    onCollapseDirectory: collapseDirectory,
+    onExpandDirectory: handleExpandDirectory,
+    onCollapseDirectory: handleCollapseDirectory,
     onNewFile: handleNewFile,
     onNewFolder: handleNewFolder,
     onRename: handleRename,
@@ -1238,6 +1272,21 @@ export function FileTree({
 
   const treeContent = !useVirtual ? (
     <div className="py-1">
+      {rootCreating && onRootCreateConfirm && onRootCreateCancel && (
+        <InlineInput
+          defaultValue={rootCreating === 'file' ? 'untitled' : 'new-folder'}
+          onConfirm={onRootCreateConfirm}
+          onCancel={onRootCreateCancel}
+          level={0}
+          icon={
+            rootCreating === 'file' ? (
+              <File className="h-4 w-4 shrink-0 text-muted-foreground" />
+            ) : (
+              <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground rotate-90" />
+            )
+          }
+        />
+      )}
       {flatNodes.map(({ node, level, compactName, compactedPaths }, index) => (
         <React.Fragment key={node.path}>
           <FileTreeItem {...buildItemProps(node, level, compactName, compactedPaths)} />

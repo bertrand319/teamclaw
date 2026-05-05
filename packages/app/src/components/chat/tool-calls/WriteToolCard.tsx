@@ -1,24 +1,14 @@
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import { useEffect, useCallback, useMemo } from "react";
+import { useTranslation } from "react-i18next";
 import {
-  ChevronRight,
   Loader2,
-  FilePlus,
-  Copy,
-  CheckCheck,
-  AlertTriangle,
-  CheckCircle2,
 } from "lucide-react";
-import { cn, copyToClipboard } from "@/lib/utils";
-import { ToolCall, useSessionStore } from "@/stores/session";
+import { cn } from "@/lib/utils";
+import { ToolCall } from "@/stores/session";
 import { useWorkspaceStore } from "@/stores/workspace";
-import { PermissionApprovalBar } from "./PermissionApprovalBar";
 import {
-  statusConfig,
   extractFilePath,
-  getFileExtension,
-  getLanguageName,
   getFileName,
-  useToolCallTimeout,
 } from "./tool-call-utils";
 import { parseSingleFileDiff, type DiffLine } from "@/components/diff/diff-ast";
 import { ToolCallDiffBody } from "./ToolCallDiffBody";
@@ -26,6 +16,7 @@ import {
   resolveWorkspaceRelativePath,
   useToolCallFileOnDisk,
 } from "@/hooks/useToolCallFileOnDisk";
+import { ToolCallStatusGlyph } from "./ToolCallStatusGlyph";
 
 // Generate unified diff for new file (empty before)
 function generateNewFileDiff(content: string, filePath: string): string {
@@ -46,10 +37,7 @@ function generateNewFileDiff(content: string, filePath: string): string {
 }
 
 export function WriteToolCard({ toolCall }: { toolCall: ToolCall }) {
-  const [isExpanded, setIsExpanded] = useState(true);
-  const [copied, setCopied] = useState(false);
-  const isTimedOut = useToolCallTimeout(toolCall);
-  const forceComplete = useSessionStore((s) => s.forceCompleteToolCall);
+  const { t } = useTranslation();
   const selectFile = useWorkspaceStore((s) => s.selectFile);
   const workspacePath = useWorkspaceStore((s) => s.workspacePath);
 
@@ -68,10 +56,6 @@ export function WriteToolCard({ toolCall }: { toolCall: ToolCall }) {
   const streamingContent =
     typeof toolCall.result === "string" ? toolCall.result : "";
   const content = argsContent || streamingContent;
-  const ext = getFileExtension(filePath);
-  const langName = getLanguageName(ext);
-  const config = statusConfig[toolCall.status];
-  const StatusIcon = config.icon;
 
   // Generate unified diff for new file (shows as all additions)
   const fullPath = useMemo(
@@ -106,20 +90,6 @@ export function WriteToolCard({ toolCall }: { toolCall: ToolCall }) {
     }
   }, [content, filePath]);
 
-  const handleCopy = async () => {
-    await copyToClipboard(content);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
-  const handleForceComplete = useCallback(
-    (e: React.MouseEvent) => {
-      e.stopPropagation();
-      forceComplete(toolCall.id);
-    },
-    [forceComplete, toolCall.id],
-  );
-
   const canOpenFile =
     Boolean(filePath) &&
     Boolean(fullPath) &&
@@ -131,30 +101,22 @@ export function WriteToolCard({ toolCall }: { toolCall: ToolCall }) {
     selectFile(fullPath);
   }, [canOpenFile, fullPath, selectFile]);
 
-  const handleToggleExpand = useCallback((e: React.MouseEvent) => {
-    e.stopPropagation();
-    setIsExpanded((prev) => !prev);
-  }, []);
-
   return (
-    <div className="rounded-lg border border-border bg-muted/30 overflow-hidden transition-all duration-200">
-      {/* Header: click chevron to toggle, click rest to open file */}
+    <div
+      data-testid="tool-card-write"
+      className="overflow-hidden rounded-[14px] border border-[#e7edf4] bg-[#fbfcfe] transition-all duration-200 dark:border-border dark:bg-card"
+    >
       <div
         className={cn(
-          "flex items-center gap-2 px-3 py-2 bg-muted/50 transition-colors select-none hover:bg-muted/70",
+          "flex items-center gap-2 border-b border-[#eef2f5] px-[14px] py-3 select-none dark:border-border/60 dark:bg-transparent",
           canOpenFile ? "cursor-pointer" : "",
         )}
-        onClick={canOpenFile ? handleOpenFile : handleToggleExpand}
+        onClick={canOpenFile ? handleOpenFile : undefined}
       >
-        <ChevronRight
-          size={14}
-          className={cn(
-            "text-muted-foreground transition-transform duration-200 shrink-0",
-            isExpanded && "rotate-90",
-          )}
-          onClick={handleToggleExpand}
-        />
-        <FilePlus size={14} className="text-muted-foreground shrink-0" />
+        <span className="text-[13px] text-muted-foreground shrink-0">+</span>
+        <span className="text-sm font-semibold text-foreground shrink-0">
+          {t("chat.toolCall.write.title", "Write")}
+        </span>
         {filePath && (
           <span
             className={cn(
@@ -169,66 +131,33 @@ export function WriteToolCard({ toolCall }: { toolCall: ToolCall }) {
           </span>
         )}
         {!filePath && <span className="flex-1" />}
-        <span className="text-[10px] text-muted-foreground">{langName}</span>
         {diffData && diffData.additions > 0 && (
           <span className="text-[10px] text-green-600 dark:text-green-500">+{diffData.additions}</span>
         )}
-        {toolCall.duration && (
-          <span className="text-[10px] text-muted-foreground/70">
-            {toolCall.duration < 1000
-              ? `${toolCall.duration}ms`
-              : `${(toolCall.duration / 1000).toFixed(1)}s`}
-          </span>
-        )}
-        <button
-          onClick={handleCopy}
-          className="p-1 rounded hover:bg-background transition-colors"
-          title="Copy content"
-        >
-          {copied ? (
-            <CheckCheck size={12} className="text-foreground" />
-          ) : (
-            <Copy size={12} className="text-muted-foreground" />
-          )}
-        </button>
-        {isTimedOut ? (
-          <button
-            onClick={handleForceComplete}
-            className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] bg-muted hover:bg-muted/80 text-foreground border border-border transition-colors"
-            title="Tool call timed out - click to mark as done"
-          >
-            <AlertTriangle size={10} />
-            <span>Timed out</span>
-            <CheckCircle2 size={10} />
-          </button>
-        ) : (
-          <StatusIcon
-            size={14}
-            className={cn(config.textColor, config.animate && "animate-spin")}
-          />
-        )}
+        <ToolCallStatusGlyph status={toolCall.status} />
       </div>
 
-      {isExpanded && diffData && diffData.lines.length > 0 && (
-        <ToolCallDiffBody lines={diffData.lines} />
+      {diffData && diffData.lines.length > 0 && (
+        <div className="px-[14px] pb-3 pt-3">
+          <div className="overflow-hidden rounded-[10px] border border-[#eef2f5] bg-[#fcfdff] dark:border-border/60 dark:bg-background/40">
+            <ToolCallDiffBody lines={diffData.lines} variant="snippet" previewLineCount={3} />
+          </div>
+        </div>
       )}
 
-      {/* Loading placeholder when no content yet */}
-      {isExpanded && !content && toolCall.status === "calling" && (
-        <div className="p-3 flex items-center gap-2 text-xs text-muted-foreground">
+      {!content && toolCall.status === "calling" && (
+        <div className="border-t border-border/50 p-3 flex items-center gap-2 text-xs text-muted-foreground">
           <Loader2 size={12} className="animate-spin" />
-          <span>Writing file...</span>
+          <span>{t("chat.toolCall.write.writing", "Writing file...")}</span>
         </div>
       )}
 
-      {/* Fallback: show error if diff generation failed but we have content */}
-      {isExpanded && content && !diffData && (
-        <div className="p-3 text-xs text-muted-foreground italic">
-          Unable to generate diff view
+      {content && !diffData && (
+        <div className="border-t border-border/50 p-3 text-xs text-muted-foreground italic">
+          {t("chat.toolCall.diff.unavailable", "Unable to generate diff view")}
         </div>
       )}
 
-      <PermissionApprovalBar toolCall={toolCall} />
     </div>
   );
 }

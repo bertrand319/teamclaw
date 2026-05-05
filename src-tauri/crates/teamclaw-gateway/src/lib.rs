@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 pub mod config;
 pub mod discord;
 pub mod email;
@@ -8,7 +10,6 @@ pub mod feishu_config;
 pub mod i18n;
 pub mod kook;
 pub mod kook_config;
-pub mod mqtt_config;
 pub mod pending_question;
 pub mod session;
 pub mod session_queue;
@@ -252,6 +253,49 @@ pub async fn send_message_async_with_approval(
     .await
 }
 
+/// Inject a message into OpenCode session history without triggering AI response.
+/// Used for collaborative messages that don't @Agent — records context silently.
+pub async fn inject_context_no_reply(
+    port: u16,
+    session_id: &str,
+    content: &str,
+    sender_name: &str,
+) -> Result<(), String> {
+    let prefixed = format!("[{}] {}", sender_name, content);
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    let url = format!(
+        "http://127.0.0.1:{}/session/{}/prompt_async",
+        port, session_id
+    );
+    let body = serde_json::json!({
+        "parts": [{ "type": "text", "text": prefixed }],
+        "noReply": true,
+    });
+
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("inject_context_no_reply failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body_text = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "inject_context_no_reply HTTP {} - {}",
+            status, body_text
+        ));
+    }
+
+    Ok(())
+}
+
 /// Unified SSE handler using a pre-established SSE connection.
 async fn poll_for_message_with_approval_from_stream(
     sse_response: reqwest::Response,
@@ -323,14 +367,16 @@ async fn poll_for_message_with_approval_from_stream(
                             .and_then(|p| p.get("info").and_then(|i| i.get("parentID")))
                             .and_then(|p| p.as_str());
 
-                        if parent_id == Some(session_id) && new_session_id.is_some() {
-                            let child_id = new_session_id.unwrap().to_string();
-                            if tracked_sessions.insert(child_id.clone()) {
-                                println!(
-                                    "[Gateway-{}] Detected child session: {}",
-                                    &session_id[..session_id.len().min(8)],
-                                    child_id
-                                );
+                        if parent_id == Some(session_id) {
+                            if let Some(new_session_id) = new_session_id {
+                                let child_id = new_session_id.to_string();
+                                if tracked_sessions.insert(child_id.clone()) {
+                                    println!(
+                                        "[Gateway-{}] Detected child session: {}",
+                                        &session_id[..session_id.len().min(8)],
+                                        child_id
+                                    );
+                                }
                             }
                         }
                         continue;
@@ -436,14 +482,15 @@ async fn poll_for_message_with_approval_from_stream(
                                 .and_then(|c| c.as_u64());
                             let message_id = info.get("id").and_then(|id| id.as_str());
 
-                            if role == Some("assistant")
-                                && created_time.is_some()
-                                && created_time.unwrap() >= send_timestamp_ms
-                                && message_id.is_some()
-                            {
-                                let msg_id = message_id.unwrap();
+                            if role == Some("assistant") {
+                                if let (Some(created_time), Some(msg_id)) =
+                                    (created_time, message_id)
+                                {
+                                    if created_time < send_timestamp_ms {
+                                        continue;
+                                    }
 
-                                if completed_time.is_some() {
+                                    if completed_time.is_some() {
                                     let finish_reason = info.get("finish").and_then(|f| f.as_str());
 
                                     if finish_reason != Some("tool-calls") {
@@ -459,6 +506,7 @@ async fn poll_for_message_with_approval_from_stream(
                                     if new_message_id.is_none() {
                                         new_message_id = Some(msg_id.to_string());
                                     }
+                                }
                                 }
                             }
                         }
@@ -626,14 +674,25 @@ pub async fn opencode_get_available_models(port: u16) -> Result<(Vec<ModelInfo>,
 }
 
 /// Format the model list response for chat commands
-pub fn format_model_list(models: &[ModelInfo], active_model: &str, is_custom: bool, locale: i18n::Locale) -> String {
+pub fn format_model_list(
+    models: &[ModelInfo],
+    active_model: &str,
+    is_custom: bool,
+    locale: i18n::Locale,
+) -> String {
     const MAX_LENGTH: usize = 1900;
 
     let mut text = String::new();
     if is_custom {
-        text.push_str(&i18n::t(i18n::MsgKey::CurrentModelCustom(active_model), locale));
+        text.push_str(&i18n::t(
+            i18n::MsgKey::CurrentModelCustom(active_model),
+            locale,
+        ));
     } else {
-        text.push_str(&i18n::t(i18n::MsgKey::CurrentModelDefault(active_model), locale));
+        text.push_str(&i18n::t(
+            i18n::MsgKey::CurrentModelDefault(active_model),
+            locale,
+        ));
     }
     text.push_str(&i18n::t(i18n::MsgKey::AvailableModels, locale));
 
@@ -645,7 +704,7 @@ pub fn format_model_list(models: &[ModelInfo], active_model: &str, is_custom: bo
     for m in models {
         provider_groups
             .entry(m.provider.clone())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(m);
     }
 
@@ -803,14 +862,18 @@ pub async fn opencode_list_sessions(port: u16) -> Result<Vec<SessionInfo>, Strin
         None => return Err("Unexpected session list format".to_string()),
     };
 
-    sessions.sort_by(|a, b| b.updated.cmp(&a.updated));
+    sessions.sort_by_key(|session| std::cmp::Reverse(session.updated));
     sessions.truncate(MAX_SESSIONS_LIST);
 
     Ok(sessions)
 }
 
 /// Fetch the latest assistant message text from a session
-async fn fetch_latest_assistant_message(port: u16, session_id: &str, locale: i18n::Locale) -> Result<String, String> {
+async fn fetch_latest_assistant_message(
+    port: u16,
+    session_id: &str,
+    locale: i18n::Locale,
+) -> Result<String, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
@@ -952,12 +1015,11 @@ pub async fn handle_sessions_command(
                 };
 
                 match fetch_latest_assistant_message(port, &target.id, locale).await {
-                    Ok(latest) => {
-                        i18n::t(i18n::MsgKey::SwitchedToSessionWithLatest(title, &latest), locale)
-                    }
-                    Err(_) => {
-                        i18n::t(i18n::MsgKey::SwitchedToSessionNoLatest(title), locale)
-                    }
+                    Ok(latest) => i18n::t(
+                        i18n::MsgKey::SwitchedToSessionWithLatest(title, &latest),
+                        locale,
+                    ),
+                    Err(_) => i18n::t(i18n::MsgKey::SwitchedToSessionNoLatest(title), locale),
                 }
             }
             Err(e) => i18n::t(i18n::MsgKey::FailedToListSessions(&e), locale),
@@ -992,7 +1054,10 @@ pub async fn handle_stop_command(
             } else {
                 let status = resp.status();
                 let body = resp.text().await.unwrap_or_default();
-                i18n::t(i18n::MsgKey::FailedToStopSessionWithStatus(status.as_u16(), &body), locale)
+                i18n::t(
+                    i18n::MsgKey::FailedToStopSessionWithStatus(status.as_u16(), &body),
+                    locale,
+                )
             }
         }
         Err(e) => i18n::t(i18n::MsgKey::FailedToStopSession(&e.to_string()), locale),
@@ -1056,4 +1121,67 @@ pub fn write_config(
         .map_err(|e| format!("Failed to serialize config: {}", e))?;
 
     std::fs::write(&path, content).map_err(|e| format!("Failed to write config file: {}", e))
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_inject_context_no_reply_formats_message() {
+        let mock_server = wiremock::MockServer::start().await;
+        let port = mock_server.address().port();
+
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path_regex("/session/.*/prompt_async"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .mount(&mock_server)
+            .await;
+
+        let result = inject_context_no_reply(port, "test-session", "hello world", "张三").await;
+        assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
+
+        let requests = mock_server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(body["noReply"], true);
+        let text = body["parts"][0]["text"].as_str().unwrap();
+        assert!(
+            text.starts_with("[张三]"),
+            "Expected [张三] prefix, got: {}",
+            text
+        );
+        assert!(text.contains("hello world"));
+    }
+
+    #[tokio::test]
+    async fn test_inject_context_no_reply_error_response() {
+        let mock_server = wiremock::MockServer::start().await;
+        let port = mock_server.address().port();
+
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(500).set_body_string("Internal Error"))
+            .mount(&mock_server)
+            .await;
+
+        let result = inject_context_no_reply(port, "test-session", "msg", "user").await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("500"),
+            "Error should contain status code: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_inject_context_no_reply_connection_refused() {
+        // Use a port that nothing is listening on
+        let result = inject_context_no_reply(19999, "test-session", "msg", "user").await;
+        assert!(result.is_err());
+    }
 }

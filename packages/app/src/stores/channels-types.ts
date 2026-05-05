@@ -150,6 +150,8 @@ export interface WeComConfig {
   botId: string
   secret: string
   encodingAesKey?: string
+  /** Auto-recorded userid of the person who bound this bot (first DM sender) */
+  ownerId?: string
 }
 
 export type WeComGatewayStatus = 'disconnected' | 'connecting' | 'connected' | 'error'
@@ -158,6 +160,8 @@ export interface WeComGatewayStatusResponse {
   status: WeComGatewayStatus
   errorMessage?: string
   botId?: string
+  /** Active session keys (e.g. "wecom:dm:userid", "wecom:chatid") */
+  activeSessions?: string[]
 }
 
 export interface WeComQrAuthStart {

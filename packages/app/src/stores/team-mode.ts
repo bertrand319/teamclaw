@@ -1,14 +1,48 @@
 import { create } from 'zustand'
 import {
-  addCustomProviderToConfig,
+  getCustomProviderConfig,
   removeCustomProviderFromConfig,
 } from '@/lib/opencode/config'
+import { loadTeamProviderFile, TEAM_SHARED_PROVIDER_ID } from '@/lib/team-provider'
 import { useProviderStore } from './provider'
 import { isTauri } from '@/lib/utils'
-import { appShortName, buildConfig } from '@/lib/build-config'
+import { appShortName, buildConfig, TEAM_REPO_DIR, type TeamModelOption } from '@/lib/build-config'
 
 
-const TEAM_PROVIDER_ID = 'team'
+const TEAM_PROVIDER_ID = TEAM_SHARED_PROVIDER_ID
+
+/**
+ * Upgrade `http://` → `https://` for remote LLM hosts.
+ *
+ * LiteLLM deployments behind Caddy/Nginx typically 308-redirect `http` → `https`,
+ * and both fetch and the AI SDK drop the `Authorization` header across that
+ * redirect — surfacing as `Authentication Error, No api key passed in.` on
+ * chat-completions calls. Force https for any non-local host before we hand
+ * the URL to OpenCode's provider config.
+ *
+ * Local/private hosts keep `http://` (they don't redirect, and users may run
+ * a dev LiteLLM without TLS).
+ */
+function normalizeLlmBaseUrl(url: string): string {
+  if (!url.startsWith('http://')) return url
+  try {
+    const parsed = new URL(url)
+    const host = parsed.hostname
+    const isLocal =
+      host === 'localhost' ||
+      host === '127.0.0.1' ||
+      host === '0.0.0.0' ||
+      host.endsWith('.local') ||
+      /^10\./.test(host) ||
+      /^192\.168\./.test(host) ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(host)
+    if (isLocal) return url
+    parsed.protocol = 'https:'
+    return parsed.toString().replace(/\/$/, '')
+  } catch {
+    return url
+  }
+}
 
 export interface TeamModelConfig {
   baseUrl: string
@@ -20,31 +54,45 @@ interface TeamModeState {
   teamMode: boolean
   teamModeType: string | null // "p2p" | "oss" | "webdav" | "git" — from teamclaw.json
   teamModelConfig: TeamModelConfig | null
+  teamModelOptions: TeamModelOption[] // available model choices from build config
   _appliedConfigKey: string | null // fingerprint of last applied config to avoid redundant apply
   devUnlocked: boolean // hidden dev mode: unlocks model selector & hidden dirs in team mode
   myRole: 'owner' | 'editor' | 'viewer' | null
   p2pConnected: boolean
   p2pConfigured: boolean
   p2pFileSyncStatusMap: Record<string, 'synced' | 'modified' | 'new'>
+  teamGitFileSyncStatusMap: Record<string, 'modified' | 'new'>
+  /** True while a Git team sync is in progress (for file tree loading indicator) */
+  teamGitSyncing: boolean
+  /** ISO timestamp of last successful team repo sync (read from teamclaw.json) */
+  teamGitLastSyncAt: string | null
 
   loadTeamConfig: (workspacePath: string) => Promise<void>
   applyTeamModelToOpenCode: (workspacePath: string, force?: boolean) => Promise<void>
+  switchTeamModel: (modelId: string, workspacePath: string) => Promise<void>
   clearTeamMode: (workspacePath?: string) => Promise<void>
   setDevUnlocked: (unlocked: boolean) => void
   loadP2pFileSyncStatus: () => Promise<void>
+  loadTeamGitFileSyncStatus: (workspacePath: string) => Promise<void>
+}
+
+interface TeamStatusLlm extends TeamModelConfig {
+  models?: Array<{ id: string; name: string }>
 }
 
 interface TeamStatusResponse {
   active: boolean
   mode: string | null
-  llm: TeamModelConfig | null
+  llm: TeamStatusLlm | null
 }
 
-async function fetchTeamStatus(): Promise<TeamStatusResponse | null> {
+async function fetchTeamStatus(workspacePath?: string): Promise<TeamStatusResponse | null> {
   if (!isTauri()) return null
   try {
     const { invoke } = await import('@tauri-apps/api/core')
-    return await invoke<TeamStatusResponse>('get_team_status')
+    return await invoke<TeamStatusResponse>('get_team_status', {
+      workspacePath: workspacePath ?? null,
+    })
   } catch (err) {
     console.warn('[TeamMode] Failed to read team status:', err)
     return null
@@ -56,16 +104,20 @@ export const useTeamModeStore = create<TeamModeState>((set, get) => ({
   teamMode: false,
   teamModeType: null,
   teamModelConfig: null,
+  teamModelOptions: buildConfig.team.llm.models ?? [],
   _appliedConfigKey: null,
-  devUnlocked: false,
+  devUnlocked: true,
   myRole: null,
   p2pConnected: false,
   p2pConfigured: false,
+  teamGitSyncing: false,
+  teamGitLastSyncAt: null,
   p2pFileSyncStatusMap: {},
+  teamGitFileSyncStatusMap: {},
 
   loadTeamConfig: async (_workspacePath: string) => {
     // teamMode = p2p.enabled || ossConfigured
-    const status = await fetchTeamStatus()
+    const status = await fetchTeamStatus(_workspacePath)
     // Check OSS config directly from backend to avoid stale store state on workspace switch
     let ossConfigured = false
     if (isTauri()) {
@@ -75,18 +127,60 @@ export const useTeamModeStore = create<TeamModeState>((set, get) => ({
         ossConfigured = !!ossConfig?.enabled
       } catch { /* ignore */ }
     }
+    // Load last sync timestamp from teamclaw.json (git mode persists it via team_sync_repo)
+    if (isTauri()) {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core')
+        const teamConfig = await invoke<{ lastSyncAt?: string | null } | null>('get_team_config', {
+          workspacePath: _workspacePath,
+        })
+        set({ teamGitLastSyncAt: teamConfig?.lastSyncAt ?? null })
+      } catch { /* ignore */ }
+    }
     const p2pActive = !!status?.active
     const isTeamMode = p2pActive || ossConfigured
 
     if (isTeamMode) {
       set({ teamMode: true, teamModeType: status?.mode ?? (ossConfigured ? 'oss' : null) })
-      if (status?.llm) {
+      if ((status?.mode ?? (ossConfigured ? 'oss' : null)) === 'git' && _workspacePath) {
+        // Fire-and-forget; errors swallowed inside action
+        get().loadTeamGitFileSyncStatus(_workspacePath)
+      }
+      const providerFile = _workspacePath ? await loadTeamProviderFile(_workspacePath).catch(() => null) : null
+      if (providerFile?.provider) {
+        const teamModels = providerFile.provider.models
+        const defaultModelId = providerFile.provider.defaultModel || teamModels[0]?.id || ''
+        const defaultModel = teamModels.find((model) => model.id === defaultModelId) || teamModels[0]
         const config: TeamModelConfig = {
-          baseUrl: status.llm.baseUrl,
-          model: status.llm.model,
-          modelName: status.llm.modelName || status.llm.model,
+          baseUrl: normalizeLlmBaseUrl(providerFile.provider.baseURL),
+          model: defaultModel?.id || '',
+          modelName: defaultModel?.name || defaultModel?.id || '',
         }
-        set({ teamModelConfig: config })
+        set({ teamModelConfig: config, teamModelOptions: teamModels })
+      } else if (status?.llm) {
+        // Use models from team config (stored in teamclaw.json), fallback to build config
+        const teamModels = status.llm.models && status.llm.models.length > 0
+          ? status.llm.models
+          : (buildConfig.team.llm.models ?? [])
+        // Restore previously selected team model if available
+        let selectedModel = status.llm.model
+        let selectedModelName = status.llm.modelName || status.llm.model
+        if (teamModels.length > 0) {
+          try {
+            const savedModelId = localStorage.getItem(`${appShortName}-team-model`)
+            const match = savedModelId ? teamModels.find((m) => m.id === savedModelId) : null
+            if (match) {
+              selectedModel = match.id
+              selectedModelName = match.name
+            }
+          } catch { /* ignore */ }
+        }
+        const config: TeamModelConfig = {
+          baseUrl: normalizeLlmBaseUrl(status.llm.baseUrl),
+          model: selectedModel,
+          modelName: selectedModelName,
+        }
+        set({ teamModelConfig: config, teamModelOptions: teamModels })
       } else {
         set({ teamModelConfig: null })
       }
@@ -109,16 +203,32 @@ export const useTeamModeStore = create<TeamModeState>((set, get) => ({
   },
 
   applyTeamModelToOpenCode: async (workspacePath: string, force?: boolean) => {
+    // Refresh in-memory state from `_meta/provider.json`. Disk → opencode.json
+    // sync is owned by Rust `ensure_team_provider`, which runs inside every
+    // start_opencode — we never write opencode.json from here.
+    const providerFile = await loadTeamProviderFile(workspacePath).catch(() => null)
+    if (providerFile?.provider) {
+      const syncedModels = providerFile.provider.models
+      const defaultModelId = providerFile.provider.defaultModel || syncedModels[0]?.id || ''
+      const defaultModel = syncedModels.find((model) => model.id === defaultModelId) || syncedModels[0]
+      set({
+        teamModelConfig: {
+          baseUrl: normalizeLlmBaseUrl(providerFile.provider.baseURL),
+          model: defaultModel?.id || '',
+          modelName: defaultModel?.name || defaultModel?.id || '',
+        },
+        teamModelOptions: syncedModels,
+      })
+    }
+
     const { teamModelConfig, _appliedConfigKey } = get()
     if (!teamModelConfig) return
 
-    // Build a fingerprint of the current config to avoid redundant restarts/toasts
     const configKey = `${teamModelConfig.baseUrl}|${teamModelConfig.model}`
     if (!force && configKey === _appliedConfigKey) return
     set({ _appliedConfigKey: configKey })
 
     try {
-      // Save current model before overriding
       const providerStore = useProviderStore.getState()
       const currentModel = providerStore.currentModelKey
       if (currentModel && !currentModel.startsWith('team/')) {
@@ -127,67 +237,56 @@ export const useTeamModeStore = create<TeamModeState>((set, get) => ({
         } catch { /* ignore */ }
       }
 
-      // Write custom provider to opencode.json
-      const modelConfig: any = {
-        modelId: teamModelConfig.model,
-        modelName: teamModelConfig.modelName,
-        // Standard token limits for GPT-5.x models
-        limit: {
-          context: 256000,
-          output: 16000
-        }
-      }
+      // Skip the restart if the running sidecar's opencode.json already matches what
+      // we want — Rust `ensure_team_provider` writes it on cold start, so post-boot
+      // applyTeamModelToOpenCode calls are usually no-ops.
+      const teamModels = get().teamModelOptions.length > 0 ? get().teamModelOptions : (buildConfig.team.llm.models ?? [])
+      const expectedModelIds = teamModels.map((m) => m.id).sort()
+      const existingConfig = await getCustomProviderConfig(workspacePath, TEAM_PROVIDER_ID).catch(() => null)
+      const existingModelIds = existingConfig?.models.map((m) => m.modelId).sort() ?? []
+      const configAlreadyMatches = !!existingConfig
+        && existingConfig.baseURL === teamModelConfig.baseUrl
+        && JSON.stringify(expectedModelIds) === JSON.stringify(existingModelIds)
 
-      // Add vision support if configured in build config
-      if (buildConfig.team.llm.supportsVision) {
-        modelConfig.modalities = {
-          input: ['text', 'image'],
-          output: ['text']
-        }
-      }
-
-      await addCustomProviderToConfig(workspacePath, {
-        name: 'Team',
-        baseURL: teamModelConfig.baseUrl,
-        apiKey: '${tc_api_key}',
-        models: [modelConfig],
-      })
-
-      // Restart OpenCode to pick up new provider config
-      if (isTauri()) {
-        const { invoke } = await import('@tauri-apps/api/core')
-        const { initOpenCodeClient } = await import('@/lib/opencode/sdk-client')
-
-        await invoke('stop_opencode')
-        await new Promise((r) => setTimeout(r, 500))
-        const status = await invoke<{ url: string }>('start_opencode', {
-          config: { workspace_path: workspacePath },
-        })
-        initOpenCodeClient({ baseUrl: status.url, workspacePath })
-
-        // Notify workspace store so SSE reconnects to the new sidecar
-        const { useWorkspaceStore } = await import('./workspace')
-        useWorkspaceStore.getState().setOpenCodeReady(true, status.url)
-
-        // Wait for OpenCode to initialize
-        await new Promise((r) => setTimeout(r, 500))
+      if (!configAlreadyMatches && isTauri()) {
+        const { restartOpencode } = await import('@/lib/opencode/restart')
+        await restartOpencode(workspacePath)
       }
 
       await providerStore.selectModel(TEAM_PROVIDER_ID, teamModelConfig.model, teamModelConfig.modelName)
       await providerStore.refreshConfiguredProviders()
-
-      console.log('[TeamMode] Applied team model config:', teamModelConfig)
     } catch (err) {
       console.error('[TeamMode] Failed to apply team model to OpenCode:', err)
     }
   },
 
-  setDevUnlocked: (unlocked: boolean) => {
-    set({ devUnlocked: unlocked })
-    // Refresh file tree so hidden files appear/disappear
-    import('./workspace').then(({ useWorkspaceStore }) => {
-      useWorkspaceStore.getState().refreshFileTree()
-    })
+  switchTeamModel: async (modelId: string, _workspacePath: string) => {
+    const { teamModelConfig, teamModelOptions } = get()
+    if (!teamModelConfig) return
+    const option = teamModelOptions.find((m) => m.id === modelId)
+    if (!option) return
+
+    const newConfig: TeamModelConfig = {
+      baseUrl: teamModelConfig.baseUrl,
+      model: modelId,
+      modelName: option.name,
+    }
+    set({ teamModelConfig: newConfig })
+
+    // Select the model in OpenCode (all models are already registered in the provider)
+    const providerStore = useProviderStore.getState()
+    await providerStore.selectModel(TEAM_PROVIDER_ID, modelId, option.name)
+
+    // Persist selection
+    try {
+      localStorage.setItem(`${appShortName}-team-model`, modelId)
+    } catch { /* ignore */ }
+
+    console.log('[TeamMode] Switched team model to:', modelId)
+  },
+
+  setDevUnlocked: (_unlocked: boolean) => {
+    set({ devUnlocked: true })
   },
 
   loadP2pFileSyncStatus: async () => {
@@ -205,12 +304,42 @@ export const useTeamModeStore = create<TeamModeState>((set, get) => ({
     }
   },
 
+  loadTeamGitFileSyncStatus: async (workspacePath: string) => {
+    if (!isTauri() || !workspacePath) return
+    try {
+      const { invoke } = await import('@tauri-apps/api/core')
+      const result = await invoke<{
+        branch: string | null
+        clean: boolean
+        files: Array<{ path: string; status: string; staged: boolean }>
+      }>('git_status', { path: `${workspacePath}/${TEAM_REPO_DIR}` })
+      const map: Record<string, 'modified' | 'new'> = {}
+      for (const f of result.files) {
+        if (f.status === 'untracked') {
+          map[f.path] = 'new'
+        } else if (
+          f.status === 'modified' ||
+          f.status === 'added' ||
+          f.status === 'deleted' ||
+          f.status === 'renamed' ||
+          f.status === 'copied'
+        ) {
+          map[f.path] = 'modified'
+        }
+        // 'ignored' and 'unknown' are omitted
+      }
+      set({ teamGitFileSyncStatusMap: map })
+    } catch (e) {
+      console.debug('[team-mode] loadTeamGitFileSyncStatus skipped:', e)
+    }
+  },
+
   clearTeamMode: async (workspacePath?: string) => {
     // When LLM config is locked via build config, prevent exiting team mode
     if (buildConfig.team.lockLlmConfig) return
 
     // Set state immediately to trigger UI updates
-    set({ teamMode: false, teamModeType: null, teamModelConfig: null, _appliedConfigKey: null, p2pFileSyncStatusMap: {} })
+    set({ teamMode: false, teamModeType: null, teamModelConfig: null, _appliedConfigKey: null, p2pFileSyncStatusMap: {}, teamGitFileSyncStatusMap: {} })
 
     // Remove team provider from opencode.json
     if (workspacePath) {

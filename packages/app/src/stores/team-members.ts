@@ -2,6 +2,8 @@
 import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
 import type { TeamMember } from '../lib/git/types'
+import { useShortcutsStore } from './shortcuts'
+import { useWorkspaceStore } from './workspace'
 
 type MemberRole = 'owner' | 'manager' | 'editor' | 'viewer'
 
@@ -39,6 +41,25 @@ interface TeamMembersState {
   reset: () => void
 }
 
+function normalizeShortcutRoles(roles: string[] | null | undefined): string[] {
+  if (!Array.isArray(roles)) return []
+  return roles.filter((role): role is string => typeof role === 'string' && role.trim().length > 0)
+}
+
+function syncCurrentShortcutRoles(members: TeamMember[], currentNodeId: string | null): void {
+  const currentMember = currentNodeId
+    ? members.find((member) => member.nodeId === currentNodeId)
+    : undefined
+  useShortcutsStore.getState().setCurrentShortcutRoles(
+    normalizeShortcutRoles(currentMember?.shortcutsRole),
+  )
+}
+
+function getWorkspaceArgs() {
+  const workspacePath = useWorkspaceStore.getState().workspacePath
+  return workspacePath ? { workspacePath } : {}
+}
+
 export const useTeamMembersStore = create<TeamMembersState>((set, get) => ({
   members: [],
   myRole: null,
@@ -53,7 +74,9 @@ export const useTeamMembersStore = create<TeamMembersState>((set, get) => ({
     try {
       const info = await invoke<{ nodeId: string }>('get_device_info')
       set({ currentNodeId: info.nodeId })
+      syncCurrentShortcutRoles(get().members, info.nodeId)
     } catch {
+      useShortcutsStore.getState().setCurrentShortcutRoles([])
       // P2P node not running yet — will retry next call
     }
   },
@@ -61,16 +84,18 @@ export const useTeamMembersStore = create<TeamMembersState>((set, get) => ({
   loadMembers: async () => {
     set({ loading: true, error: null })
     try {
-      const members = await invoke<TeamMember[]>('unified_team_get_members')
+      const members = await invoke<TeamMember[]>('unified_team_get_members', getWorkspaceArgs())
       set({ members, loading: false })
+      syncCurrentShortcutRoles(members, get().currentNodeId)
     } catch (e) {
+      useShortcutsStore.getState().setCurrentShortcutRoles([])
       set({ error: String(e), loading: false })
     }
   },
 
   loadMyRole: async () => {
     try {
-      const role = await invoke<MemberRole | null>('unified_team_get_my_role')
+      const role = await invoke<MemberRole | null>('unified_team_get_my_role', getWorkspaceArgs())
       set({ myRole: role })
     } catch {
       set({ myRole: null })
@@ -80,7 +105,7 @@ export const useTeamMembersStore = create<TeamMembersState>((set, get) => ({
   addMember: async (member: TeamMember) => {
     set({ error: null })
     try {
-      await invoke('unified_team_add_member', { member })
+      await invoke('unified_team_add_member', { member, ...getWorkspaceArgs() })
       await get().loadMembers()
     } catch (e) {
       set({ error: String(e) })
@@ -91,7 +116,7 @@ export const useTeamMembersStore = create<TeamMembersState>((set, get) => ({
   removeMember: async (nodeId: string) => {
     set({ error: null })
     try {
-      await invoke('unified_team_remove_member', { nodeId })
+      await invoke('unified_team_remove_member', { nodeId, ...getWorkspaceArgs() })
       await get().loadMembers()
     } catch (e) {
       set({ error: String(e) })
@@ -102,7 +127,7 @@ export const useTeamMembersStore = create<TeamMembersState>((set, get) => ({
   updateMemberRole: async (nodeId: string, role: MemberRole) => {
     set({ error: null })
     try {
-      await invoke('unified_team_update_member_role', { nodeId, role })
+      await invoke('unified_team_update_member_role', { nodeId, role, ...getWorkspaceArgs() })
       await get().loadMembers()
     } catch (e) {
       set({ error: String(e) })
@@ -140,6 +165,7 @@ export const useTeamMembersStore = create<TeamMembersState>((set, get) => ({
     if (_unlistenApplications) {
       _unlistenApplications()
     }
+    useShortcutsStore.getState().setCurrentShortcutRoles([])
     set({
       members: [],
       myRole: null,
@@ -151,13 +177,16 @@ export const useTeamMembersStore = create<TeamMembersState>((set, get) => ({
   },
 
   approveApplication: async (app) => {
+    set({ error: null })
     try {
+      console.log('[TeamMembers] Approving application:', app.nodeId, app.name)
       await invoke('oss_approve_application', {
         nodeId: app.nodeId,
         name: app.name,
         email: app.email,
         role: 'editor',
       })
+      console.log('[TeamMembers] Approval succeeded for:', app.nodeId)
       // Remove from local list
       set((state) => ({
         applications: state.applications.filter((a) => a.nodeId !== app.nodeId),
@@ -165,7 +194,9 @@ export const useTeamMembersStore = create<TeamMembersState>((set, get) => ({
       // Reload members to reflect the new member
       get().loadMembers()
     } catch (e) {
+      console.error('[TeamMembers] Approval failed:', e)
       set({ error: String(e) })
+      throw e
     }
   },
 }))

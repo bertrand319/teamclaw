@@ -35,9 +35,10 @@
 
 use tauri::Manager;
 use tauri_plugin_aptabase::EventTracker;
-use tauri_plugin_global_shortcut::{Code, Modifiers, ShortcutState};
+use tauri_plugin_global_shortcut::ShortcutState;
 
 mod commands;
+pub mod process_util;
 pub mod sentry_utils;
 mod telemetry;
 
@@ -124,7 +125,9 @@ fn fix_path_env() {
     }
 
     // Spawn a login shell to get the full PATH
+    use crate::process_util::CommandNoWindow;
     let output = std::process::Command::new(&shell)
+        .no_window()
         .args(["-l", "-c", "echo $PATH"])
         .output();
 
@@ -162,6 +165,40 @@ fn fix_path_env() {
             }
         }
     }
+}
+
+// Foreground-activation heartbeat for Aptabase DAU.
+// `app_started` only fires on cold start; on macOS users who keep the app
+// running for days would otherwise show as DAU only on day 1. Firing
+// `app_active` on focus / Reopen (rate-limited) closes that gap.
+static LAST_ACTIVE_AT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+const APP_ACTIVE_THRESHOLD_SECS: i64 = 4 * 3600;
+
+fn now_unix_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn record_activity() {
+    LAST_ACTIVE_AT.store(now_unix_secs(), std::sync::atomic::Ordering::Relaxed);
+}
+
+fn maybe_emit_app_active(app: &tauri::AppHandle) {
+    let now = now_unix_secs();
+    let last = LAST_ACTIVE_AT.load(std::sync::atomic::Ordering::Relaxed);
+    if last != 0 && now - last < APP_ACTIVE_THRESHOLD_SECS {
+        return;
+    }
+    LAST_ACTIVE_AT.store(now, std::sync::atomic::Ordering::Relaxed);
+    let _ = app.track_event(
+        "app_active",
+        Some(serde_json::json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "platform": std::env::consts::OS,
+        })),
+    );
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -214,42 +251,21 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         // NOTE: aptabase is registered in the setup() closure below so that
         // the Tokio runtime is available when its internal `tokio::spawn` runs.
-        .plugin({
-            // Configure global shortcuts for Spotlight.
-            // Errors in shortcut registration should not abort app startup, so we
-            // log in debug builds and fall back to a plugin without shortcuts.
-            let base = tauri_plugin_global_shortcut::Builder::new();
-            let builder = base
-                // Cross-platform Spotlight shortcut:
-                // - macOS: Option+Space
-                // - Windows/others: Alt+Space
-                .with_shortcuts(["alt+space"])
-                .unwrap_or_else(|err| {
-                    sentry_utils::capture_err("[global-shortcut] Failed to register Spotlight shortcuts", &err);
-                    #[cfg(debug_assertions)]
-                    eprintln!("[global-shortcut] Failed to register Spotlight shortcuts: {err}");
-                    tauri_plugin_global_shortcut::Builder::new()
-                });
-
-            builder
-                .with_handler(|app, shortcut, event| {
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
                     if event.state != ShortcutState::Pressed {
                         return;
                     }
 
-                    // Alt/Option + Space
-                    let is_alt_space = shortcut.matches(Modifiers::ALT, Code::Space);
-
-                    if is_alt_space {
-                        let app_clone = app.clone();
-                        let _ = app.run_on_main_thread(move || {
-                            let state = app_clone.state::<commands::spotlight::SpotlightState>();
-                            commands::spotlight::toggle_spotlight(app_clone.clone(), state);
-                        });
-                    }
+                    let app_clone = app.clone();
+                    let _ = app.run_on_main_thread(move || {
+                        let state = app_clone.state::<commands::spotlight::SpotlightState>();
+                        commands::spotlight::toggle_spotlight(app_clone.clone(), state);
+                    });
                 })
                 .build()
-        })
+        )
         .plugin({
             #[cfg(debug_assertions)]
             {
@@ -264,6 +280,7 @@ pub fn run() {
             }
         })
         .manage(commands::opencode::OpenCodeState::default())
+        .manage(commands::window::WindowRegistry::default())
         .manage(commands::filewatcher::FileWatcherState::default())
         .manage(commands::gateway::GatewayState::default())
         .manage(commands::cron::CronState::default())
@@ -281,6 +298,9 @@ pub fn run() {
         .manage(<commands::p2p_state::IrohState>::default())
         .manage(<commands::p2p_state::SyncEngineState>::default())
         .manage(commands::spotlight::SpotlightState::default())
+        .manage(commands::app_settings::SpotlightShortcutState::new(
+            commands::app_settings::read_spotlight_shortcut(),
+        ))
         .manage(tokio::sync::Mutex::new(commands::team_webdav::WebDavManagedState::default()))
         .manage(commands::oss_sync::OssSyncState::default())
         .manage(commands::version_commands::VersionStoreState::default())
@@ -309,6 +329,9 @@ pub fn run() {
             commands::knowledge::rag_stop_watcher,
             commands::opencode::start_opencode,
             commands::opencode::stop_opencode,
+            commands::window::create_workspace_window,
+            commands::window::set_window_title,
+            commands::opencode::clear_last_workspace,
             commands::opencode::get_opencode_status,
             commands::opencode::get_opencode_project_id,
             commands::opencode::read_opencode_allowlist,
@@ -371,13 +394,10 @@ pub fn run() {
             commands::gateway::start_wechat_qr_login,
             commands::gateway::poll_wechat_qr_status,
             commands::gateway::test_wechat_connection,
-            commands::gateway::get_mqtt_relay_config,
-            commands::gateway::save_mqtt_relay_config,
-            commands::gateway::start_mqtt_relay,
-            commands::gateway::stop_mqtt_relay,
-            commands::gateway::get_mqtt_relay_status,
-            commands::gateway::generate_mqtt_pairing_code,
-            commands::gateway::unpair_mqtt_device,
+            commands::gateway::load_shortcuts,
+            commands::gateway::save_shortcuts,
+            commands::gateway::load_system_prompt,
+            commands::gateway::save_system_prompt,
             commands::cron::cron_init,
             commands::cron::cron_list_jobs,
             commands::cron::cron_add_job,
@@ -419,10 +439,17 @@ pub fn run() {
             commands::git::git_diff,
             commands::git::git_checkout_file,
             commands::git::git_show_file,
+            commands::git::git_log_file,
             commands::team::get_team_status,
+            commands::team::update_team_llm_config,
             commands::team::team_check_git_installed,
             commands::team::team_check_workspace_has_git,
             commands::team::team_init_repo,
+            commands::team::team_git_create,
+            commands::team::team_git_join,
+            commands::team::team_git_join_background,
+            commands::team::init_git_team_secrets,
+            commands::team::get_git_team_secret,
             commands::team::team_generate_gitignore,
             commands::team::team_sync_repo,
             commands::team::team_disconnect_repo,
@@ -489,10 +516,15 @@ pub fn run() {
             commands::oss_commands::oss_update_members,
             commands::oss_commands::oss_reset_team_secret,
             commands::oss_commands::oss_get_team_config,
+            commands::oss_commands::oss_update_service_config,
             commands::oss_commands::oss_apply_team,
             commands::oss_commands::oss_get_pending_application,
             commands::oss_commands::oss_cancel_application,
             commands::oss_commands::oss_approve_application,
+            commands::oss_commands::oss_mark_file_deleted,
+            commands::oss_commands::oss_list_remote_keys,
+            commands::oss_commands::oss_dump_crdt,
+            commands::oss_commands::oss_restore_deleted,
             commands::version_commands::team_list_file_versions,
             commands::version_commands::team_list_all_versioned_files,
             commands::version_commands::team_restore_file_version,
@@ -545,6 +577,10 @@ pub fn run() {
             commands::webview::webview_find_in_page,
             commands::webview::webview_clear_find,
             commands::webview::webview_set_zoom,
+            commands::workspace_files::read_workspace_text_file,
+            commands::workspace_files::read_workspace_binary_file,
+            commands::app_settings::get_spotlight_shortcut,
+            commands::app_settings::set_spotlight_shortcut,
             commands::spotlight::toggle_spotlight,
             commands::spotlight::set_spotlight_pin,
             commands::spotlight::show_main_window,
@@ -571,6 +607,18 @@ pub fn run() {
             // for its internal `tokio::spawn` polling loop.
             app.handle().plugin(tauri_plugin_aptabase::Builder::new("A-US-9094113207").build())?;
 
+            let spotlight_shortcut = app
+                .handle()
+                .state::<commands::app_settings::SpotlightShortcutState>()
+                .current();
+            if let Err(err) =
+                commands::app_settings::register_spotlight_shortcut(app.handle(), &spotlight_shortcut)
+            {
+                sentry_utils::capture_err("[global-shortcut] Failed to register Spotlight shortcut", &err);
+                #[cfg(debug_assertions)]
+                eprintln!("[global-shortcut] Failed to register Spotlight shortcut: {err}");
+            }
+
             // Start RAG HTTP API server for MCP bridge
             let rag_state_handle = app.handle().state::<commands::knowledge::RagState>();
             let rag_state_for_http = std::sync::Arc::new(rag_state_handle.inner().clone());
@@ -581,6 +629,16 @@ pub fn run() {
                     eprintln!("[RAG HTTP] Failed to start HTTP server: {}", e);
                 }
             });
+
+            // Start introspect MCP internal API server
+            {
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = commands::introspect_api::start_introspect_api(app_handle).await {
+                        eprintln!("[IntrospectAPI] Failed to start: {}", e);
+                    }
+                });
+            }
 
             // Initialize iroh P2P node only when P2P team is configured.
             // Check the last workspace's config; if p2p.enabled != true, skip.
@@ -829,6 +887,11 @@ pub fn run() {
                                 commands::spotlight::reposition_traffic_lights(&main_win_clone);
                             }
                         }
+                        // DAU heartbeat: fires `app_active` once the app
+                        // returns to focus after >=4h idle.
+                        tauri::WindowEvent::Focused(true) => {
+                            maybe_emit_app_active(&close_app_handle);
+                        }
                         _ => {}
                     }
                 });
@@ -948,6 +1011,7 @@ pub fn run() {
                 "version": env!("CARGO_PKG_VERSION"),
                 "platform": std::env::consts::OS,
             })));
+            record_activity();
 
             Ok(())
         })
@@ -963,6 +1027,7 @@ pub fn run() {
                     // unconditionally bring the window back.
                     let state = app.state::<commands::spotlight::SpotlightState>();
                     commands::spotlight::show_main_window(app.clone(), state);
+                    maybe_emit_app_active(app);
                 }
                 tauri::RunEvent::Exit => {
                     // Kill the OpenCode sidecar synchronously.
@@ -971,14 +1036,22 @@ pub fn run() {
                     // which causes block_on to deadlock or panic, preventing
                     // std::process::exit from ever being called.
                     let oc_state = app.state::<commands::opencode::OpenCodeState>();
-                    if let Ok(mut inner) = oc_state.inner.lock() {
-                        if let Some(handle) = inner.reader_task.take() {
-                            handle.abort();
-                        }
-                        if let Some(child) = inner.child_process.take() {
-                            if let Err(e) = child.kill() {
-                                sentry_utils::capture_err("[OpenCode] Failed to stop sidecar on exit", &e);
-                                eprintln!("[OpenCode] Failed to stop sidecar on app exit: {}", e);
+                    if let Ok(mut instances) = oc_state.instances.lock() {
+                        for (ws, inner) in instances.iter_mut() {
+                            if let Some(handle) = inner.reader_task.take() {
+                                handle.abort();
+                            }
+                            if let Some(child) = inner.child_process.take() {
+                                if let Err(e) = child.kill() {
+                                    sentry_utils::capture_err(
+                                        &format!("[OpenCode] Failed to stop sidecar on exit ({})", ws),
+                                        &e,
+                                    );
+                                    eprintln!(
+                                        "[OpenCode] Failed to stop sidecar on app exit ({}): {}",
+                                        ws, e
+                                    );
+                                }
                             }
                         }
                     }

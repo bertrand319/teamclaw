@@ -2,11 +2,22 @@ import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import type { ToolCall } from "@/stores/session";
 
+vi.mock("react-i18next", () => ({
+  useTranslation: () => ({
+    t: (key: string, fallback?: string, options?: Record<string, unknown>) => {
+      const template = fallback ?? key;
+      return template.replace(/\{\{(\w+)\}\}/g, (_, token: string) =>
+        String(options?.[token] ?? `{{${token}}}`),
+      );
+    },
+  }),
+}));
+
 vi.mock("@/stores/session", () => ({
   useSessionStore: Object.assign(
     (selector: (state: unknown) => unknown) =>
       selector({
-        forceCompleteToolCall: vi.fn(),
+        replyPermission: vi.fn(() => Promise.resolve()),
       }),
     {
       getState: () => ({
@@ -59,7 +70,7 @@ vi.mock("@/lib/utils", async () => {
   };
 });
 
-import { TaskToolCard } from "@/components/chat/tool-calls/TaskToolCard";
+import { SkillToolCard, TaskToolCard } from "@/components/chat/tool-calls/TaskToolCard";
 
 describe("TaskToolCard", () => {
   it("keeps only the view-session entry in the parent session", () => {
@@ -91,9 +102,35 @@ describe("TaskToolCard", () => {
 
     render(<TaskToolCard toolCall={toolCall} />);
 
-    expect(screen.getByText("查看会话")).toBeTruthy();
+    expect(screen.getByText(/View session/)).toBeTruthy();
     expect(screen.queryByText("查看子任务详情")).toBeNull();
     expect(screen.queryByText("final child output should not be shown inline")).toBeNull();
     expect(screen.queryByText("streaming details should stay in the child session view")).toBeNull();
+  });
+
+  it("does not render inline permission approval actions for pending skill tool calls", () => {
+    const toolCall: ToolCall = {
+      id: "skill-1",
+      name: "skill",
+      status: "waiting",
+      arguments: {
+        name: "dispatching-parallel-agents",
+      },
+      startTime: new Date("2026-04-10T10:00:00Z"),
+      permission: {
+        id: "perm-skill-1",
+        permission: "skill",
+        patterns: ["dispatching-parallel-agents"],
+        decision: "pending",
+      },
+    };
+
+    render(<SkillToolCard toolCall={toolCall} />);
+
+    expect(screen.getByText("Skill")).toBeTruthy();
+    expect(screen.getByText("dispatching-parallel-agents")).toBeTruthy();
+    expect(screen.queryByText("Deny")).toBeNull();
+    expect(screen.queryByText("Always allow 'dispatching-parallel-agents'")).toBeNull();
+    expect(screen.queryByText("Allow")).toBeNull();
   });
 });

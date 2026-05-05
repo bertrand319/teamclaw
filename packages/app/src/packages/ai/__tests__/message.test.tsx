@@ -1,6 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import React from 'react'
+
+let shouldThrowMarkdown = false
+const mermaidInitializeMock = vi.fn()
+const mermaidRenderMock = vi.fn(async (id: string, code: string) => ({
+  svg: `<svg data-testid="mermaid-svg" data-diagram-id="${id}"><text>${code}</text></svg>`,
+}))
 
 vi.mock('@/lib/utils', () => ({
   cn: (...args: unknown[]) => args.filter(Boolean).join(' '),
@@ -18,20 +24,60 @@ vi.mock('@/components/ui/dialog', () => ({
 }))
 
 vi.mock('react-markdown', () => ({
-  default: ({ children }: { children: string }) => React.createElement('div', { 'data-testid': 'markdown' }, children),
+  default: ({
+    children,
+    components,
+  }: {
+    children: string
+    components?: {
+      code?: (props: { className?: string; children?: React.ReactNode }) => React.ReactNode
+    }
+  }) => {
+    if (shouldThrowMarkdown) {
+      throw new Error('Invalid regular expression: invalid group specifier name')
+    }
+
+    const mermaidMatch = children.match(/^```(\w+)\n([\s\S]*?)\n```$/)
+    if (mermaidMatch && components?.code) {
+      return React.createElement(
+        'div',
+        { 'data-testid': 'markdown' },
+        components.code({
+          className: `language-${mermaidMatch[1]}`,
+          children: mermaidMatch[2],
+        }),
+      )
+    }
+
+    return React.createElement('div', { 'data-testid': 'markdown' }, children)
+  },
 }))
 
 vi.mock('remark-gfm', () => ({
   default: () => {},
 }))
 
+vi.mock('mermaid', () => ({
+  default: {
+    initialize: mermaidInitializeMock,
+    render: mermaidRenderMock,
+  },
+}))
+
 vi.mock('lucide-react', () => ({
   Download: () => React.createElement('span', null, 'Download'),
   X: () => React.createElement('span', null, 'X'),
+  Copy: () => React.createElement('span', null, 'Copy'),
+  Check: () => React.createElement('span', null, 'Check'),
 }))
 
 beforeEach(() => {
   vi.clearAllMocks()
+  shouldThrowMarkdown = false
+  document.documentElement.classList.remove('dark')
+  mermaidRenderMock.mockImplementation(async (id: string, code: string) => ({
+    svg: `<svg data-testid="mermaid-svg" data-diagram-id="${id}"><text>${code}</text></svg>`,
+  }))
 })
 
 describe('Message', () => {
@@ -128,5 +174,119 @@ describe('image preview rendering', () => {
     const images = screen.getAllByAltText('photo.png')
     expect(images.length).toBeGreaterThan(0)
     expect(images[0].getAttribute('src')).toBe(pngDataUrl)
+  })
+})
+
+describe('MessageResponse', () => {
+  it('falls back to plain text when markdown rendering throws', async () => {
+    shouldThrowMarkdown = true
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    const { Message, MessageContent, MessageResponse } = await import('@/packages/ai/message')
+
+    render(
+      React.createElement(Message, { from: 'assistant' },
+        React.createElement(MessageContent, null,
+          React.createElement(MessageResponse, null, 'hello **world**')
+        )
+      )
+    )
+
+    expect(screen.getByText('hello **world**')).toBeDefined()
+    expect(screen.queryByTestId('markdown')).toBeNull()
+
+    warnSpy.mockRestore()
+  })
+
+  it('renders mermaid fenced code with a diagram container instead of a plain code block', async () => {
+    const { Message, MessageContent, MessageResponse } = await import('@/packages/ai/message')
+
+    const mermaidSource = [
+      '```mermaid',
+      'flowchart LR',
+      '  A[Start] --> B[Done]',
+      '```',
+    ].join('\n')
+
+    const { container } = render(
+      React.createElement(Message, { from: 'assistant' },
+        React.createElement(MessageContent, null,
+          React.createElement(MessageResponse, null, mermaidSource)
+        )
+      )
+    )
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="mermaid-block"]')).toBeTruthy()
+      expect(container.querySelector('[data-testid="mermaid-svg"]')).toBeTruthy()
+    })
+    expect(container.querySelector('pre')).toBeNull()
+  })
+
+  it('falls back to a normal mermaid code block when diagram rendering fails', async () => {
+    mermaidRenderMock.mockRejectedValueOnce(new Error('render failed'))
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { Message, MessageContent, MessageResponse } = await import('@/packages/ai/message')
+
+    const mermaidSource = [
+      '```mermaid',
+      'flowchart LR',
+      '  A[Broken] --> B[Fallback]',
+      '```',
+    ].join('\n')
+
+    const { container } = render(
+      React.createElement(Message, { from: 'assistant' },
+        React.createElement(MessageContent, null,
+          React.createElement(MessageResponse, null, mermaidSource)
+        )
+      )
+    )
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="mermaid-block"]')).toBeNull()
+      expect(container.querySelector('pre')).toBeTruthy()
+      expect(container.querySelector('code')?.textContent).toContain('flowchart LR')
+    })
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[MessageResponse] Mermaid render failed, falling back to code block',
+      expect.any(Error),
+    )
+
+    warnSpy.mockRestore()
+  })
+
+  it('uses the dark mermaid theme when the document is in dark mode', async () => {
+    document.documentElement.classList.add('dark')
+    const { Message, MessageContent, MessageResponse } = await import('@/packages/ai/message')
+
+    render(
+      React.createElement(Message, { from: 'assistant' },
+        React.createElement(MessageContent, null,
+          React.createElement(MessageResponse, null, '```mermaid\nflowchart LR\nA --> B\n```')
+        )
+      )
+    )
+
+    await waitFor(() => {
+      expect(mermaidInitializeMock).toHaveBeenCalledWith(expect.objectContaining({ theme: 'dark' }))
+    })
+  })
+
+  it('keeps non-mermaid fenced code on the normal code block path', async () => {
+    const { Message, MessageContent, MessageResponse } = await import('@/packages/ai/message')
+
+    const { container } = render(
+      React.createElement(Message, { from: 'assistant' },
+        React.createElement(MessageContent, null,
+          React.createElement(MessageResponse, null, '```typescript\nconst answer = 42\n```')
+        )
+      )
+    )
+
+    expect(container.querySelector('[data-testid="mermaid-block"]')).toBeNull()
+    expect(container.querySelector('pre')).toBeTruthy()
+    expect(screen.getByText('const answer = 42')).toBeTruthy()
+    expect(mermaidRenderMock).not.toHaveBeenCalled()
   })
 })

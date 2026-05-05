@@ -1,7 +1,6 @@
 import * as React from 'react'
 import { useTranslation } from 'react-i18next'
 import { KeyRound, Plus, Eye, EyeOff, Pencil, Trash2, ShieldCheck, AlertCircle, RefreshCw, Loader2, Users, User, Lock, Copy, Check } from 'lucide-react'
-import { invoke } from '@tauri-apps/api/core'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -17,15 +16,20 @@ import { SettingCard, SectionHeader } from './shared'
 import { useEnvVarsStore } from '@/stores/env-vars'
 import { useSharedSecretsStore } from '@/stores/shared-secrets'
 import { useTeamMembersStore } from '@/stores/team-members'
+// `myRole` is null until the user joins a team; gate team-shared UI on it so
+// users without a team don't hit the backend's `secrets not initialized` error.
 import { useWorkspaceStore } from '@/stores/workspace'
-import { initOpenCodeClient } from '@/lib/opencode/sdk-client'
+import { restartOpencode } from '@/lib/opencode/restart'
 import { listen } from '@tauri-apps/api/event'
 
 // ─── Unified type for the combined list ─────────────────────────────────
 
 type UnifiedEntry =
-  | { scope: 'personal'; key: string; description?: string; category?: 'system' | null; dirty?: boolean }
+  | { scope: 'personal'; key: string; description?: string; category?: 'system' | 'system-shared' | null; dirty?: boolean }
   | { scope: 'team'; key: string; description: string; category: string; createdBy: string; updatedBy: string; updatedAt: string; dirty?: boolean }
+  // Placeholder shown when a `system-shared` system def exists but the team secret
+  // has not yet been set. Edit-saves default to "Share with team".
+  | { scope: 'team-placeholder'; key: string; description?: string; category: 'system-shared'; dirty?: boolean }
 
 // ─── Add / Edit Dialog ──────────────────────────────────────────────────
 
@@ -38,21 +42,41 @@ interface EnvVarDialogProps {
 
 function EnvVarDialog({ open, onOpenChange, editingEntry, onSave }: EnvVarDialogProps) {
   const { t } = useTranslation()
+  const myRole = useTeamMembersStore((s) => s.myRole)
+  const teamAvailable = myRole !== null
   const [key, setKey] = React.useState('')
   const [value, setValue] = React.useState('')
   const [description, setDescription] = React.useState('')
   const [shared, setShared] = React.useState(false)
   const [saving, setSaving] = React.useState(false)
+  const [showValue, setShowValue] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
 
   const isEditing = !!editingEntry
+  // `system-shared` placeholders haven't been saved yet; treat the dialog as a
+  // first-time create so a value is required and the key+description are seeded
+  // from the system definition.
+  const isPlaceholder = editingEntry?.scope === 'team-placeholder'
+  const isFirstSave = !isEditing || isPlaceholder
+  // Lock the key for system / system-shared / placeholder rows so the user can't
+  // rename a system-managed entry into something else.
+  const lockedKey =
+    isPlaceholder ||
+    (editingEntry?.scope === 'personal' && editingEntry.category === 'system') ||
+    editingEntry?.scope === 'team'
 
   React.useEffect(() => {
     if (open) {
+      setShowValue(false)
       if (editingEntry) {
         setKey(editingEntry.key)
         setDescription(editingEntry.description || '')
-        setShared(editingEntry.scope === 'team')
+        // Default-share when editing a team secret OR a system-shared placeholder,
+        // but only if a team is actually available.
+        setShared(
+          teamAvailable &&
+            (editingEntry.scope === 'team' || editingEntry.scope === 'team-placeholder'),
+        )
         setValue('')
       } else {
         setKey('')
@@ -62,7 +86,7 @@ function EnvVarDialog({ open, onOpenChange, editingEntry, onSave }: EnvVarDialog
       }
       setError(null)
     }
-  }, [open, editingEntry])
+  }, [open, editingEntry, teamAvailable])
 
   const handleSave = async () => {
     const trimmedKey = key.trim()
@@ -70,16 +94,21 @@ function EnvVarDialog({ open, onOpenChange, editingEntry, onSave }: EnvVarDialog
       setError(t('settings.envVars.error.keyRequired', 'Key is required'))
       return
     }
-    if (!value && !isEditing) {
+    if (!value && isFirstSave) {
       setError(t('settings.envVars.error.valueRequired', 'Value is required'))
       return
     }
-    if (!value && isEditing) {
+    if (!value && isEditing && !isPlaceholder) {
       setError(t('settings.envVars.error.valueRequired', 'Please enter the new value'))
       return
     }
+    // shared_secrets requires lowercase keys server-side. For system-shared
+    // placeholder rows the displayed key is uppercase (matches the env-var name
+    // autoui-mcp reads), but the dialog stores the lowercase form transparently
+    // — so we accept either case here and let `onSave` normalize.
     if (shared) {
-      if (!/^[a-z0-9_]+$/.test(trimmedKey) || trimmedKey.length > 64) {
+      const probe = isPlaceholder ? trimmedKey.toLowerCase() : trimmedKey
+      if (!/^[a-z0-9_]+$/.test(probe) || probe.length > 64) {
         setError(t('settings.envVars.error.invalidKeyShared', 'Shared key must be lowercase letters, digits, underscores (max 64 chars)'))
         return
       }
@@ -93,7 +122,11 @@ function EnvVarDialog({ open, onOpenChange, editingEntry, onSave }: EnvVarDialog
     setSaving(true)
     setError(null)
     try {
-      await onSave(trimmedKey, value, description.trim() || '', shared)
+      // Lowercase the key when saving a system-shared placeholder as a team
+      // secret — the displayed name is uppercase (env-var convention) but
+      // shared_secrets stores lowercase. opencode injects both cases at startup.
+      const outboundKey = isPlaceholder && shared ? trimmedKey.toLowerCase() : trimmedKey
+      await onSave(outboundKey, value, description.trim() || '', shared)
       onOpenChange(false)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -127,8 +160,8 @@ function EnvVarDialog({ open, onOpenChange, editingEntry, onSave }: EnvVarDialog
               value={key}
               onChange={(e) => setKey(e.target.value)}
               placeholder={shared ? 'openai_api_key' : 'MY_API_KEY'}
-              disabled={isEditing}
-              autoFocus={!isEditing}
+              disabled={lockedKey}
+              autoFocus={!lockedKey}
             />
           </div>
 
@@ -136,13 +169,27 @@ function EnvVarDialog({ open, onOpenChange, editingEntry, onSave }: EnvVarDialog
             <label className="text-sm font-medium">
               {t('settings.envVars.value', 'Value')}
             </label>
-            <Input
-              type="password"
-              value={value}
-              onChange={(e) => setValue(e.target.value)}
-              placeholder={isEditing ? '••••••••' : 'sk-...'}
-              autoFocus={isEditing}
-            />
+            <div className="relative">
+              <Input
+                type={showValue ? 'text' : 'password'}
+                value={value}
+                onChange={(e) => setValue(e.target.value)}
+                placeholder={isEditing ? '••••••••' : 'sk-...'}
+                autoFocus={isEditing}
+                className="pr-9"
+              />
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="absolute right-1 top-1/2 -translate-y-1/2 h-7 w-7 text-muted-foreground hover:text-foreground"
+                onClick={() => setShowValue((v) => !v)}
+                tabIndex={-1}
+                title={showValue ? t('settings.envVars.hideValue', 'Hide value') : t('settings.envVars.showValue', 'Show value')}
+              >
+                {showValue ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+              </Button>
+            </div>
           </div>
 
           <div className="space-y-2">
@@ -159,23 +206,29 @@ function EnvVarDialog({ open, onOpenChange, editingEntry, onSave }: EnvVarDialog
             />
           </div>
 
-          {/* Share with team checkbox */}
-          <div className="flex items-center gap-2">
-            <Checkbox
-              id="shared"
-              checked={shared}
-              onCheckedChange={(checked) => setShared(checked === true)}
-              disabled={isEditing}
-            />
-            <label htmlFor="shared" className="text-sm font-medium cursor-pointer select-none flex items-center gap-1.5">
-              <Users className="h-3.5 w-3.5 text-blue-500" />
-              {t('settings.envVars.shareWithTeam', 'Share with team')}
-            </label>
-          </div>
-          {shared && !isEditing && (
-            <p className="text-xs text-muted-foreground ml-6">
-              {t('settings.envVars.shareHint', 'This variable will be encrypted and synced to all team members.')}
-            </p>
+          {/* Share with team checkbox — locked for system-shared placeholders
+              (always team-shared) and existing team secrets (scope is fixed).
+              Hidden entirely when the user has not joined a team. */}
+          {teamAvailable && (
+            <>
+              <div className="flex items-center gap-2">
+                <Checkbox
+                  id="shared"
+                  checked={shared}
+                  onCheckedChange={(checked) => setShared(checked === true)}
+                  disabled={isEditing || isPlaceholder}
+                />
+                <label htmlFor="shared" className="text-sm font-medium cursor-pointer select-none flex items-center gap-1.5">
+                  <Users className="h-3.5 w-3.5 text-blue-500" />
+                  {t('settings.envVars.shareWithTeam', 'Share with team')}
+                </label>
+              </div>
+              {shared && isFirstSave && (
+                <p className="text-xs text-muted-foreground ml-6">
+                  {t('settings.envVars.shareHint', 'This variable will be encrypted and synced to all team members.')}
+                </p>
+              )}
+            </>
           )}
 
           {error && (
@@ -261,10 +314,12 @@ function EnvVarRow({ entry, canDelete, onEdit, onDelete }: EnvVarRowProps) {
   const { getEnvVarValue } = useEnvVarsStore()
 
   const isSystem = entry.scope === 'personal' && entry.category === 'system'
+  const isSystemShared = entry.category === 'system-shared'
   const isPersonal = entry.scope === 'personal'
+  const isPlaceholder = entry.scope === 'team-placeholder'
 
   const handleReveal = async () => {
-    if (!isPersonal) return // Team secrets cannot be revealed
+    if (!isPersonal) return // Team secrets / placeholders cannot be revealed
     if (revealed) {
       setRevealed(false)
       setRevealedValue(null)
@@ -293,7 +348,20 @@ function EnvVarRow({ entry, canDelete, onEdit, onDelete }: EnvVarRowProps) {
           <code className="text-sm font-mono font-medium bg-muted px-2 py-0.5 rounded">
             {entry.key}
           </code>
-          {isSystem ? (
+          {isSystemShared ? (
+            // System-managed key whose value is team-shared: show both badges so
+            // the user knows it's auto-registered AND syncs across the team.
+            <>
+              <span className="inline-flex items-center gap-1 text-xs text-violet-600 dark:text-violet-400 bg-violet-50 dark:bg-violet-950/40 px-1.5 py-0.5 rounded">
+                <Lock className="h-3 w-3" />
+                {t('settings.envVars.scopeSystem', 'System')}
+              </span>
+              <span className="inline-flex items-center gap-1 text-xs text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/40 px-1.5 py-0.5 rounded">
+                <Users className="h-3 w-3" />
+                {t('settings.envVars.scopeTeam', 'Team')}
+              </span>
+            </>
+          ) : isSystem ? (
             <span className="inline-flex items-center gap-1 text-xs text-violet-600 dark:text-violet-400 bg-violet-50 dark:bg-violet-950/40 px-1.5 py-0.5 rounded">
               <Lock className="h-3 w-3" />
               {t('settings.envVars.scopeSystem', 'System')}
@@ -307,6 +375,12 @@ function EnvVarRow({ entry, canDelete, onEdit, onDelete }: EnvVarRowProps) {
             <span className="inline-flex items-center gap-1 text-xs text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/40 px-1.5 py-0.5 rounded">
               <Users className="h-3 w-3" />
               {t('settings.envVars.scopeTeam', 'Team')}
+            </span>
+          )}
+          {isPlaceholder && (
+            <span className="inline-flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 px-1.5 py-0.5 rounded">
+              <AlertCircle className="h-3 w-3" />
+              {t('settings.envVars.notConfigured', 'Not configured')}
             </span>
           )}
           {entry.dirty && (
@@ -391,6 +465,12 @@ export const EnvVarsSection = React.memo(function EnvVarsSection() {
   const { secrets, isLoading: secretsLoading, loadSecrets, setSecret, deleteSecret, listenForChanges } = useSharedSecretsStore()
   const currentNodeId = useTeamMembersStore((s) => s.currentNodeId)
   const myRole = useTeamMembersStore((s) => s.myRole)
+  // `myRole` / `currentNodeId` are usually hydrated by TeamMemberList when the
+  // user opens the Team settings panel. Env-Vars can be reached without ever
+  // visiting that panel, so load them here too — otherwise the "Share with team"
+  // gate stays closed for users who are actually in a team.
+  const loadMyRole = useTeamMembersStore((s) => s.loadMyRole)
+  const loadCurrentNodeId = useTeamMembersStore((s) => s.loadCurrentNodeId)
   const workspacePath = useWorkspaceStore((s) => s.workspacePath)
 
   const [addDialogOpen, setAddDialogOpen] = React.useState(false)
@@ -407,6 +487,8 @@ export const EnvVarsSection = React.memo(function EnvVarsSection() {
   React.useEffect(() => {
     loadEnvVars()
     loadSecrets()
+    loadMyRole()
+    loadCurrentNodeId()
     let unlisten: (() => void) | undefined
     listenForChanges().then((fn) => { unlisten = fn })
     // Also listen for secrets-changed from sync to mark as dirty
@@ -424,30 +506,65 @@ export const EnvVarsSection = React.memo(function EnvVarsSection() {
       unlisten?.()
       unlistenSync?.()
     }
-  }, [loadEnvVars, loadSecrets, listenForChanges])
+  }, [loadEnvVars, loadSecrets, listenForChanges, loadMyRole, loadCurrentNodeId])
 
-  // Build unified list: personal env vars + team secrets
+  // Build unified list: personal env vars + team secrets, with `system-shared`
+  // system defs surfaced as either the matching team secret (uppercase key) or
+  // a placeholder row when no value has been set yet.
   const hasSyncDirty = dirtyKeys.has('__team_sync__')
   const unifiedEntries: UnifiedEntry[] = React.useMemo(() => {
-    const personal: UnifiedEntry[] = envVars.map((e) => ({
-      scope: 'personal' as const,
-      key: e.key,
-      description: e.description,
-      category: e.category,
-      dirty: dirtyKeys.has(e.key),
-    }))
-    const team: UnifiedEntry[] = secrets.map((s) => ({
-      scope: 'team' as const,
-      key: s.keyId,
-      description: s.description,
-      category: s.category,
-      createdBy: s.createdBy,
-      updatedBy: s.updatedBy,
-      updatedAt: s.updatedAt,
-      dirty: dirtyKeys.has(s.keyId) || hasSyncDirty,
-    }))
-    const all = [...team, ...personal]
-    // System entries first; all other entries sorted alphabetically by key
+    const sharedSystemDefs = envVars.filter((e) => e.category === 'system-shared')
+    // lowercase(secretKey) -> matching system-shared def (so we can promote the
+    // team secret's display key to the canonical uppercase name)
+    const sharedSystemByLower = new Map(
+      sharedSystemDefs.map((d) => [d.key.toLowerCase(), d] as const),
+    )
+    // Track which lowercase secret keys have been satisfied so we can suppress
+    // the placeholder when a value already exists.
+    const satisfiedLowerKeys = new Set<string>()
+
+    const team: UnifiedEntry[] = secrets.map((s) => {
+      const lower = s.keyId.toLowerCase()
+      const matched = sharedSystemByLower.get(lower)
+      if (matched) {
+        satisfiedLowerKeys.add(lower)
+      }
+      return {
+        scope: 'team' as const,
+        key: matched ? matched.key : s.keyId,
+        description: matched?.description || s.description,
+        category: matched ? 'system-shared' : s.category,
+        createdBy: s.createdBy,
+        updatedBy: s.updatedBy,
+        updatedAt: s.updatedAt,
+        dirty: dirtyKeys.has(s.keyId) || hasSyncDirty,
+      }
+    })
+
+    const personal: UnifiedEntry[] = envVars
+      // Drop `system-shared` defs from the personal bucket — they're either
+      // promoted into `team` above or rendered as a `team-placeholder` below.
+      .filter((e) => e.category !== 'system-shared')
+      .map((e) => ({
+        scope: 'personal' as const,
+        key: e.key,
+        description: e.description,
+        category: e.category,
+        dirty: dirtyKeys.has(e.key),
+      }))
+
+    const placeholders: UnifiedEntry[] = sharedSystemDefs
+      .filter((d) => !satisfiedLowerKeys.has(d.key.toLowerCase()))
+      .map((d) => ({
+        scope: 'team-placeholder' as const,
+        key: d.key,
+        description: d.description,
+        category: 'system-shared' as const,
+        dirty: dirtyKeys.has(d.key),
+      }))
+
+    const all = [...team, ...placeholders, ...personal]
+    // System entries (locally seeded) first, then everything else alphabetical.
     all.sort((a, b) => {
       const aIsSystem = a.scope === 'personal' && a.category === 'system'
       const bIsSystem = b.scope === 'personal' && b.category === 'system'
@@ -471,16 +588,19 @@ export const EnvVarsSection = React.memo(function EnvVarsSection() {
     if (!deleteTarget) return
     if (deleteTarget.scope === 'team') {
       await deleteSecret(deleteTarget.key, currentNodeId ?? '', myRole ?? '')
-    } else {
+    } else if (deleteTarget.scope === 'personal') {
       await deleteEnvVar(deleteTarget.key)
     }
+    // Placeholders have no backing storage to delete.
     setDeleteTarget(null)
   }
 
   // Note: the Rust env_var_delete command also enforces the system-var guard server-side.
   const canDeleteEntry = (entry: UnifiedEntry): boolean => {
-    if (entry.scope === 'personal' && entry.category === 'system') return false
+    if (entry.scope === 'team-placeholder') return false
+    if (entry.scope === 'personal' && (entry.category === 'system' || entry.category === 'system-shared')) return false
     if (entry.scope === 'personal') return true
+    if (entry.scope === 'team' && entry.category === 'system-shared') return false
     if (myRole === 'owner') return true
     if (entry.scope === 'team' && entry.createdBy === currentNodeId) return true
     return false
@@ -495,12 +615,7 @@ export const EnvVarsSection = React.memo(function EnvVarsSection() {
     setIsRestarting(true)
     setRestartError(null)
     try {
-      await invoke('stop_opencode')
-      await new Promise((resolve) => setTimeout(resolve, 500))
-      const status = await invoke<{ url: string }>('start_opencode', {
-        config: { workspace_path: workspacePath },
-      })
-      initOpenCodeClient({ baseUrl: status.url })
+      await restartOpencode(workspacePath)
       setHasChanges(false)
       setDirtyKeys(new Set())
     } catch (err) {

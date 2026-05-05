@@ -121,7 +121,18 @@ jobs:
           ) > /tmp/opencode.log 2>&1 &
           PID_OPENCODE=$!
 
-          # 3) Import Apple certificate (background, fast but independent)
+          # 3) Build teamclaw-introspect sidecar (background)
+          (
+            set -e
+            echo "Building teamclaw-introspect for ${{ matrix.target }}..."
+            cargo build --release --locked --manifest-path src-tauri/Cargo.toml -p teamclaw-introspect --target ${{ matrix.target }}
+            cp src-tauri/target/${{ matrix.target }}/release/teamclaw-introspect src-tauri/binaries/teamclaw-introspect-${{ matrix.target }}
+            chmod +x src-tauri/binaries/teamclaw-introspect-${{ matrix.target }}
+            echo "teamclaw-introspect ready"
+          ) > /tmp/introspect.log 2>&1 &
+          PID_INTROSPECT=$!
+
+          # 4) Import Apple certificate (background, fast but independent)
           (
             if [ -z "$APPLE_CERTIFICATE" ]; then
               echo "No certificate, using ad-hoc signing."
@@ -147,9 +158,10 @@ jobs:
 
           # Wait for all; dump logs on failure
           FAILED=0
-          wait $PID_FRONTEND || { echo "::error::Frontend build failed:"; cat /tmp/frontend.log; FAILED=1; }
-          wait $PID_OPENCODE || { echo "::error::opencode download failed:"; cat /tmp/opencode.log; FAILED=1; }
-          wait $PID_CERT     || { echo "::error::Certificate import failed:"; cat /tmp/cert.log; FAILED=1; }
+          wait $PID_FRONTEND   || { echo "::error::Frontend build failed:"; cat /tmp/frontend.log; FAILED=1; }
+          wait $PID_OPENCODE   || { echo "::error::opencode download failed:"; cat /tmp/opencode.log; FAILED=1; }
+          wait $PID_INTROSPECT || { echo "::error::introspect build failed:"; cat /tmp/introspect.log; FAILED=1; }
+          wait $PID_CERT       || { echo "::error::Certificate import failed:"; cat /tmp/cert.log; FAILED=1; }
 
           if [ "$FAILED" -ne 0 ]; then exit 1; fi
 
@@ -157,17 +169,32 @@ jobs:
           ls -lh src-tauri/binaries/
           ls -lh packages/app/dist/ | head -5
 
-      # Skip beforeBuildCommand since frontend is already built above
-      - name: Skip frontend rebuild in tauri build
+      # Skip beforeBuildCommand since frontend is already built above,
+      # and substitute __OSS_BASE_URL__ in updater endpoints (drop if OSS not configured).
+      - name: Finalize tauri.conf.json for build
+        env:
+          OSS_ENDPOINT: ${{ secrets.OSS_ENDPOINT }}
+          OSS_BUCKET: ${{ secrets.OSS_BUCKET }}
         run: |
-          python3 -c "
-          import json
+          python3 - <<'EOF'
+          import json, os
           with open('src-tauri/tauri.conf.json', 'r') as f:
               conf = json.load(f)
           conf['build']['beforeBuildCommand'] = 'echo frontend already built'
+          endpoints = conf.get('plugins', {}).get('updater', {}).get('endpoints', [])
+          bucket = os.environ.get('OSS_BUCKET', '')
+          endpoint_host = os.environ.get('OSS_ENDPOINT', '').replace('https://', '').replace('http://', '').rstrip('/')
+          oss_base = f'https://{bucket}.{endpoint_host}' if bucket and endpoint_host else ''
+          if oss_base:
+              endpoints = [e.replace('__OSS_BASE_URL__', oss_base) for e in endpoints]
+          endpoints = [e for e in endpoints if '__OSS_BASE_URL__' not in e]
+          conf.setdefault('plugins', {}).setdefault('updater', {})['endpoints'] = endpoints
           with open('src-tauri/tauri.conf.json', 'w') as f:
               json.dump(conf, f, indent=2)
-          "
+          print('Final updater endpoints:')
+          for e in endpoints:
+              print(f'  - {e}')
+          EOF
 
       - uses: tauri-apps/tauri-action@v0
         env:
@@ -175,6 +202,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           UPDATER_GITHUB_TOKEN: ${{ secrets.UPDATER_GITHUB_TOKEN }}
+          DEVICE_JWT_SECRET: ${{ secrets.DEVICE_JWT_SECRET }}
           SCCACHE_GHA_ENABLED: "true"
           RUSTC_WRAPPER: sccache
           CARGO_INCREMENTAL: "0"
@@ -186,7 +214,7 @@ jobs:
 
             ### macOS (one-line install)
             ```bash
-            curl -fsSL https://raw.githubusercontent.com/diffrent-ai-studio/teamclaw/main/scripts/install-mac.sh | bash
+            curl -fsSL https://raw.githubusercontent.com/different-ai-studio/teamclaw/main/scripts/install-mac.sh | bash
             ```
 
             ### macOS (manual)
@@ -205,6 +233,74 @@ jobs:
           releaseDraft: false
           prerelease: false
           args: "--target ${{ matrix.target }}"
+
+      - name: Upload to Alibaba Cloud OSS (CN mirror)
+        continue-on-error: true
+        env:
+          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+          OSS_ENDPOINT: ${{ secrets.OSS_ENDPOINT }}
+          OSS_BUCKET: ${{ secrets.OSS_BUCKET }}
+          MATRIX_TARGET: ${{ matrix.target }}
+        run: |
+          if [ -z "$OSS_ACCESS_KEY_ID" ]; then
+            echo "OSS secrets not configured, skipping mirror upload"
+            exit 0
+          fi
+          python3 -m pip install oss2 --quiet --break-system-packages 2>/dev/null || pip3 install oss2 --quiet --break-system-packages
+          python3 - <<'EOF'
+          import oss2, os, glob, sys
+
+          auth = oss2.Auth(os.environ['OSS_ACCESS_KEY_ID'], os.environ['OSS_ACCESS_KEY_SECRET'])
+          endpoint = os.environ['OSS_ENDPOINT']
+          if not endpoint.startswith('http'):
+              endpoint = 'https://' + endpoint
+          bucket = oss2.Bucket(auth, endpoint, os.environ['OSS_BUCKET'])
+          version = os.environ['GITHUB_REF_NAME']
+          target = os.environ['MATRIX_TARGET']
+
+          host = os.environ['OSS_ENDPOINT'].replace('https://', '').replace('http://', '')
+          oss_base = f'https://{os.environ["OSS_BUCKET"]}.{host}'
+
+          files = glob.glob(f'src-tauri/target/{target}/release/bundle/dmg/*.dmg')
+          if not files:
+              print(f'No DMG found for target {target}, skipping')
+              sys.exit(0)
+
+          for f in files:
+              key = f'releases/{version}/{os.path.basename(f)}'
+              print(f'Uploading {os.path.basename(f)} -> oss://{os.environ["OSS_BUCKET"]}/{key}')
+              bucket.put_object_from_file(key, f)
+              print(f'✅ {oss_base}/{key}')
+
+          # Upload latest.txt and install-mac-cn.sh only once (aarch64 job)
+          if target != 'aarch64-apple-darwin':
+              sys.exit(0)
+
+          # These are mutable "pointer" objects that change every release.
+          # Without an explicit Cache-Control header, Alibaba CDN applies its
+          # default TTL (hours), so users keep installing the previous version
+          # until the cached entry expires. Tell the CDN to re-validate.
+          short_cache = {
+              'Cache-Control': 'max-age=60, must-revalidate',
+          }
+
+          bucket.put_object(
+              'releases/latest.txt',
+              version.encode(),
+              headers={**short_cache, 'Content-Type': 'text/plain; charset=utf-8'},
+          )
+          print(f'✅ {oss_base}/releases/latest.txt -> {version}')
+
+          with open('scripts/install-mac-cn.sh', 'r') as f:
+              script = f.read()
+          bucket.put_object(
+              'install-mac-cn.sh',
+              script.encode(),
+              headers={**short_cache, 'Content-Type': 'text/x-shellscript; charset=utf-8'},
+          )
+          print(f'✅ {oss_base}/install-mac-cn.sh')
+          EOF
 
   # Windows job uploads artifacts to the same GitHub Release created by macOS job
   release-windows:
@@ -290,22 +386,44 @@ jobs:
           echo "opencode ${OPENCODE_VERSION} ready"
           ls -lh src-tauri/binaries/
 
-      # Skip beforeBuildCommand since frontend is already built above
-      - name: Skip frontend rebuild in tauri build
-        shell: python
+      - name: Build teamclaw-introspect sidecar
+        shell: bash
         run: |
-          import json
+          cargo build --release --locked --manifest-path src-tauri/Cargo.toml -p teamclaw-introspect
+          cp src-tauri/target/release/teamclaw-introspect.exe src-tauri/binaries/teamclaw-introspect-x86_64-pc-windows-msvc.exe
+          echo "teamclaw-introspect ready"
+
+      # Skip beforeBuildCommand since frontend is already built above
+      - name: Finalize tauri.conf.json for build
+        shell: python
+        env:
+          OSS_ENDPOINT: ${{ secrets.OSS_ENDPOINT }}
+          OSS_BUCKET: ${{ secrets.OSS_BUCKET }}
+        run: |
+          import json, os
           with open('src-tauri/tauri.conf.json', 'r') as f:
               conf = json.load(f)
           conf['build']['beforeBuildCommand'] = 'echo frontend already built'
+          endpoints = conf.get('plugins', {}).get('updater', {}).get('endpoints', [])
+          bucket = os.environ.get('OSS_BUCKET', '')
+          endpoint_host = os.environ.get('OSS_ENDPOINT', '').replace('https://', '').replace('http://', '').rstrip('/')
+          oss_base = f'https://{bucket}.{endpoint_host}' if bucket and endpoint_host else ''
+          if oss_base:
+              endpoints = [e.replace('__OSS_BASE_URL__', oss_base) for e in endpoints]
+          endpoints = [e for e in endpoints if '__OSS_BASE_URL__' not in e]
+          conf.setdefault('plugins', {}).setdefault('updater', {})['endpoints'] = endpoints
           with open('src-tauri/tauri.conf.json', 'w') as f:
               json.dump(conf, f, indent=2)
+          print('Final updater endpoints:')
+          for e in endpoints:
+              print(f'  - {e}')
 
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          DEVICE_JWT_SECRET: ${{ secrets.DEVICE_JWT_SECRET }}
           SCCACHE_GHA_ENABLED: "true"
           RUSTC_WRAPPER: sccache
           CARGO_INCREMENTAL: "0"
@@ -317,7 +435,7 @@ jobs:
 
             ### macOS (one-line install)
             ```bash
-            curl -fsSL https://raw.githubusercontent.com/diffrent-ai-studio/teamclaw/main/scripts/install-mac.sh | bash
+            curl -fsSL https://raw.githubusercontent.com/different-ai-studio/teamclaw/main/scripts/install-mac.sh | bash
             ```
 
             ### macOS (manual)
@@ -337,3 +455,144 @@ jobs:
           prerelease: false
           # Windows: NSIS installer, no p2p feature (avoids wmi/windows-core conflicts)
           args: "--bundles nsis -- --no-default-features"
+
+      - name: Upload to Alibaba Cloud OSS (CN mirror)
+        continue-on-error: true
+        shell: bash
+        env:
+          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+          OSS_ENDPOINT: ${{ secrets.OSS_ENDPOINT }}
+          OSS_BUCKET: ${{ secrets.OSS_BUCKET }}
+        run: |
+          if [ -z "$OSS_ACCESS_KEY_ID" ]; then
+            echo "OSS secrets not configured, skipping mirror upload"
+            exit 0
+          fi
+          python3 -m pip install oss2 --quiet --break-system-packages 2>/dev/null || pip3 install oss2 --quiet --break-system-packages
+          python3 - <<'EOF'
+          import oss2, os, glob, sys
+
+          auth = oss2.Auth(os.environ['OSS_ACCESS_KEY_ID'], os.environ['OSS_ACCESS_KEY_SECRET'])
+          endpoint = os.environ['OSS_ENDPOINT']
+          if not endpoint.startswith('http'):
+              endpoint = 'https://' + endpoint
+          bucket = oss2.Bucket(auth, endpoint, os.environ['OSS_BUCKET'])
+          version = os.environ['GITHUB_REF_NAME']
+
+          files = glob.glob('src-tauri/target/release/bundle/nsis/*.exe')
+          if not files:
+              print('No NSIS installer found, skipping')
+              sys.exit(0)
+
+          for f in files:
+              key = f'releases/{version}/{os.path.basename(f)}'
+              print(f'Uploading {os.path.basename(f)} -> oss://{os.environ["OSS_BUCKET"]}/{key}')
+              bucket.put_object_from_file(key, f)
+              host = os.environ['OSS_ENDPOINT'].replace('https://', '').replace('http://', '')
+              print(f'✅ https://{os.environ["OSS_BUCKET"]}.{host}/{key}')
+          EOF
+
+  update-release-notes:
+    needs: [release-macos, release-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Mirror latest.json to OSS
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+          OSS_ENDPOINT: ${{ secrets.OSS_ENDPOINT }}
+          OSS_BUCKET: ${{ secrets.OSS_BUCKET }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          if [ -z "$OSS_ACCESS_KEY_ID" ]; then
+            echo "OSS not configured, skipping latest.json mirror"
+            exit 0
+          fi
+          gh release download "$VERSION" \
+            --repo ${{ github.repository }} \
+            --pattern 'latest.json' \
+            --dir /tmp/oss-latest
+          python3 -m pip install oss2 --quiet --break-system-packages 2>/dev/null || pip3 install oss2 --quiet --break-system-packages
+          python3 - <<'EOF'
+          import json
+          import oss2, os
+          auth = oss2.Auth(os.environ['OSS_ACCESS_KEY_ID'], os.environ['OSS_ACCESS_KEY_SECRET'])
+          endpoint = os.environ['OSS_ENDPOINT']
+          if not endpoint.startswith('http'):
+              endpoint = 'https://' + endpoint
+          bucket = oss2.Bucket(auth, endpoint, os.environ['OSS_BUCKET'])
+          version = os.environ['VERSION']
+          cdn_base = 'https://teamclaw.ucar.cc'
+          manifest_path = '/tmp/oss-latest/latest.json'
+
+          with open(manifest_path, 'r', encoding='utf-8') as f:
+              manifest = json.load(f)
+
+          for entry in manifest.get('platforms', {}).values():
+              url = entry.get('url', '')
+              if not url:
+                  continue
+              filename = url.rstrip('/').split('/')[-1]
+              if filename:
+                  entry['url'] = f'{cdn_base}/releases/{version}/{filename}'
+
+          mirrored_manifest_path = '/tmp/oss-latest/latest.oss.json'
+          with open(mirrored_manifest_path, 'w', encoding='utf-8') as f:
+              json.dump(manifest, f, indent=2)
+              f.write('\n')
+
+          # Root pointer: must re-validate so the Tauri updater sees new releases.
+          # Per-version archive: immutable, default long cache is fine.
+          bucket.put_object_from_file(
+              'releases/latest.json',
+              mirrored_manifest_path,
+              headers={
+                  'Cache-Control': 'max-age=60, must-revalidate',
+                  'Content-Type': 'application/json; charset=utf-8',
+              },
+          )
+          bucket.put_object_from_file(f'releases/{version}/latest.json', mirrored_manifest_path)
+          print(f'Mirrored latest.json -> {oss_base}/releases/latest.json')
+          print(f'Also archived -> {oss_base}/releases/{version}/latest.json')
+          EOF
+
+      - name: Append CN mirror section to release notes
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OSS_BUCKET: ${{ secrets.OSS_BUCKET }}
+        run: |
+          if [ -z "$OSS_BUCKET" ]; then
+            echo "OSS not configured, skipping release notes update"
+            exit 0
+          fi
+          CN_BASE="https://teamclaw.ucar.cc"
+          VERSION="${{ github.ref_name }}"
+          VERSION_NUM="${VERSION#v}"
+
+          CURRENT=$(gh release view "$VERSION" --repo ${{ github.repository }} --json body -q '.body')
+
+          CN_SECTION="
+
+          ---
+
+          ### 国内加速下载
+
+          #### macOS（一键安装）
+          \`\`\`bash
+          curl -fsSL ${CN_BASE}/install-mac-cn.sh | bash
+          \`\`\`
+
+          #### macOS（手动下载）
+          - Apple Silicon：[TeamClaw_${VERSION_NUM}_aarch64.dmg](${CN_BASE}/releases/${VERSION}/TeamClaw_${VERSION_NUM}_aarch64.dmg)
+          - Intel：[TeamClaw_${VERSION_NUM}_x64.dmg](${CN_BASE}/releases/${VERSION}/TeamClaw_${VERSION_NUM}_x64.dmg)
+
+          #### Windows
+          - [TeamClaw_${VERSION_NUM}_x64-setup.exe](${CN_BASE}/releases/${VERSION}/TeamClaw_${VERSION_NUM}_x64-setup.exe)"
+
+          gh release edit "$VERSION" --repo ${{ github.repository }} --notes "${CURRENT}${CN_SECTION}"
+          echo "✅ Release notes updated with CN mirror links"

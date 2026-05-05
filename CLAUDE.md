@@ -75,6 +75,16 @@ Single source of truth principle — **never mix content sources**:
 - **S3/OSS mode**: Alibaba OSS with WebDAV
 - Shared: `skills/`, `.mcp/`, `knowledge/`
 
+## Versioning & Release
+
+**Version numbers** — Desktop version must match across `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`.
+
+**Release process:**
+1. Bump desktop version in all 3 files
+2. Commit, push to main
+3. `git tag v<desktop-version> && git push origin v<desktop-version>`
+4. Tag push triggers `release.yml` (macOS desktop)
+
 ## FC (Function Compute) Deployment
 
 FC function `teamclaw-sync` is deployed to Alibaba Cloud cn-shenzhen region.
@@ -83,4 +93,4 @@ Deploy: use the `fc-deploy` skill (`.claude/skills/fc-deploy/deploy.sh`).
 
 Production endpoint: `https://cloud.ucar.cc`
 
-FC endpoints: `/register`, `/token`, `/reset-secret`, `/apply`, `/ai/setup-team`, `/ai/add-member`, `/ai/remove-member`, `/ai/keys`, `/ai/usage`, `/ai/budget`
+FC endpoints: `/register`, `/token`, `/reset-secret`, `/apply`, `/ai/setup-team`, `/ai/add-member`, `/ai/remove-member`, `/ai/keys`, `/ai/usage`, `/ai/budget`, `/managed-git/create-repo`

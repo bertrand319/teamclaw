@@ -37,10 +37,8 @@ impl Serialize for GetDomError {
 // Automatically convert tauri::Error into GetDomError::WebviewOperation or JavaScriptError
 impl From<TauriError> for GetDomError {
     fn from(err: TauriError) -> Self {
-        // Basic differentiation, could be more sophisticated if TauriError variants allow
-        match err {
-            _ => GetDomError::JavaScriptError(err.to_string()), // Default to JS error as eval is involved
-        }
+        // Default to JS error as eval is involved.
+        GetDomError::JavaScriptError(err.to_string())
     }
 }
 
@@ -54,8 +52,8 @@ pub async fn handle_get_dom<R: Runtime>(
         // Direct string format
         payload
             .as_str()
-            .ok_or_else(|| {
-                crate::error::Error::Anyhow { message: "Invalid string payload for getDom".to_string() }
+            .ok_or_else(|| crate::error::Error::Anyhow {
+                message: "Invalid string payload for getDom".to_string(),
             })?
             .to_string()
     } else if payload.is_object() {
@@ -64,29 +62,30 @@ pub async fn handle_get_dom<R: Runtime>(
             .get("window_label")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
-            .ok_or_else(|| {
-                crate::error::Error::Anyhow {
-                    message: "Missing or invalid window_label in payload object".to_string(),
-                }
+            .ok_or_else(|| crate::error::Error::Anyhow {
+                message: "Missing or invalid window_label in payload object".to_string(),
             })?
     } else {
         return Err(crate::error::Error::Anyhow {
             message: format!(
                 "Invalid payload format for getDom: expected string or object with window_label, got {}",
                 payload
-            )
+            ),
         });
     };
 
     // Get the window by label using the Manager trait
-    let window = app.get_webview_window(&window_label).ok_or_else(|| {
-        crate::error::Error::window_not_found(&window_label)
-    })?;
+    let window = app
+        .get_webview_window(&window_label)
+        .ok_or_else(|| crate::error::Error::window_not_found(&window_label))?;
     let result = get_dom_text(app.clone(), window).await;
     match result {
         Ok(dom_text) => {
             let data = serde_json::to_value(dom_text).map_err(|e| {
-                crate::error::Error::serialization_error(format!("Failed to serialize response: {}", e))
+                crate::error::Error::serialization_error(format!(
+                    "Failed to serialize response: {}",
+                    e
+                ))
             })?;
             Ok(crate::socket_server::SocketResponse {
                 success: true,
@@ -159,7 +158,10 @@ pub async fn handle_get_element_position<R: Runtime>(
 ) -> Result<crate::socket_server::SocketResponse, crate::error::Error> {
     // Parse the payload
     let payload = serde_json::from_value::<GetElementPositionPayload>(payload).map_err(|e| {
-        crate::error::Error::serialization_error(format!("Invalid payload for get_element_position: {}", e))
+        crate::error::Error::serialization_error(format!(
+            "Invalid payload for get_element_position: {}",
+            e
+        ))
     })?;
 
     // Create a channel to receive the result
@@ -258,9 +260,11 @@ pub async fn handle_send_text_to_element<R: Runtime>(
 ) -> Result<crate::socket_server::SocketResponse, crate::error::Error> {
     // Parse the payload
     let payload = serde_json::from_value::<SendTextToElementPayload>(payload).map_err(|e| {
-        crate::error::Error::serialization_error(format!("Invalid payload for send_text_to_element: {}", e))
+        crate::error::Error::serialization_error(format!(
+            "Invalid payload for send_text_to_element: {}",
+            e
+        ))
     })?;
-
 
     // Create a channel to receive the result
     let (tx, rx) = mpsc::channel();

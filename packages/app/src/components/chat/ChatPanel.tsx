@@ -9,12 +9,13 @@ import { useSessionStore } from "@/stores/session";
 import { useStreamingStore } from "@/stores/streaming";
 import { useVoiceInputStore } from "@/stores/voice-input";
 import { useWorkspaceStore } from "@/stores/workspace";
-import { useProviderStore, getSelectedModelOption } from "@/stores/provider";
+import { useProviderStore, type ModelOption } from "@/stores/provider";
 import { useTeamModeStore } from "@/stores/team-mode";
 import { useSuggestionsStore } from "@/stores/suggestions";
 import { useShortcutsStore } from "@/stores/shortcuts";
 import { TEAMCLAW_DIR, CONFIG_FILE_NAME, TEAM_REPO_DIR } from "@/lib/build-config";
 import { ensureRoleSkillPlugin } from "../../lib/opencode/role-plugin-installer";
+import { resolveSessionActivityOwner } from "@/lib/session-list-activity";
 import type { PromptInputMessage } from "@/packages/ai/prompt-input";
 import type { SendMessageFilePart } from "@/lib/opencode/sdk-types";
 import { Suggestions, Suggestion } from "@/packages/ai/suggestion";
@@ -25,7 +26,9 @@ import { ChatInputArea } from "./ChatInputArea";
 import { getFileName } from "./utils/fileUtils";
 import { MessageList, type MessageListHandle } from "./MessageList";
 import { SessionErrorAlert } from "./SessionErrorAlert";
-import { PendingPermissionInline } from "./PermissionCard";
+import { PendingPermissionInline, hasVisiblePendingPermissions } from "./PermissionCard";
+import { TodoList } from "./TodoList";
+import { QuestionInputDock } from "./QuestionInputDock";
 
 function fileToDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -64,6 +67,25 @@ async function saveImageToWorkspace(
 
 const EMPTY_MESSAGES: Message[] = [];
 
+function parseSlashToken(body: string): { type: "role" | "skill" | "command"; name: string } {
+  if (body.startsWith("role:")) return { type: "role", name: body.slice("role:".length) };
+  if (body.startsWith("skill:")) return { type: "skill", name: body.slice("skill:".length) };
+  if (body.startsWith("command:")) return { type: "command", name: body.slice("command:".length) };
+  return { type: "skill", name: body };
+}
+
+function buildEnhancedChip(
+  type: "role" | "skill",
+  name: string,
+): string {
+  const label = type === "role" ? "Role" : "Skill";
+  const toolCall =
+    type === "role"
+      ? `role_load({ name: "${name}" })`
+      : `skill({ name: "${name}" })`;
+  return `[${label}: ${name}|instruction:You must call ${toolCall} before any other action.]`;
+}
+
 // ─── Main component ────────────────────────────────────────────────────────
 
 interface ChatPanelProps {
@@ -91,6 +113,10 @@ export function ChatPanel({ compact = false }: ChatPanelProps) {
   const sessionError = useSessionStore(s => s.sessionError);
   const inactivityWarning = useSessionStore(s => s.inactivityWarning);
   const draftInput = useSessionStore(s => s.draftInput);
+  const todos = useSessionStore(s => s.todos);
+  const pendingPermissions = useSessionStore(s => s.pendingPermissions);
+  const pendingQuestions = useSessionStore(s => s.pendingQuestions);
+  const sessions = useSessionStore(s => s.sessions);
 
   // ── Child session viewing ──────────────────────────────────────────
   const viewingChildSessionId = useSessionStore(s => s.viewingChildSessionId);
@@ -104,6 +130,11 @@ export function ChatPanel({ compact = false }: ChatPanelProps) {
     viewingChildSessionId ? s.childSessionStreaming[viewingChildSessionId] : undefined
   );
   const isViewingChild = !!viewingChildSessionId;
+  const showInlineTodo = React.useMemo(() => {
+    if (isViewingChild) return false;
+    if (todos.length === 0 && messageQueue.length === 0) return false;
+    return !hasVisiblePendingPermissions(activeSessionId, sessions, pendingPermissions);
+  }, [activeSessionId, isViewingChild, messageQueue.length, pendingPermissions, sessions, todos]);
   const displayedChildSessionMessages = React.useMemo(() => {
     if (!viewingChildSessionId) return EMPTY_MESSAGES;
 
@@ -142,6 +173,20 @@ export function ChatPanel({ compact = false }: ChatPanelProps) {
       },
     ];
   }, [childSessionMessages, childStreamingContent, viewingChildSessionId]);
+  const activeInputQuestion = React.useMemo(() => {
+    if (!activeSessionId) return null;
+    if (isViewingChild) return null;
+    return (
+      pendingQuestions.find((question) => {
+        if (!question.sessionId) return true;
+        return (
+          resolveSessionActivityOwner(question.sessionId, sessions, question.sessionId) ===
+          activeSessionId
+        );
+      }) ||
+      null
+    );
+  }, [activeSessionId, isViewingChild, pendingQuestions, sessions]);
 
   // Actions — accessed via getState() to avoid creating subscriptions.
   // Zustand actions are stable references; subscribing to them wastes equality checks.
@@ -161,7 +206,6 @@ export function ChatPanel({ compact = false }: ChatPanelProps) {
   const openCodeBootstrapped = useWorkspaceStore(s => s.openCodeBootstrapped);
   const openCodeReady = useWorkspaceStore(s => s.openCodeReady);
   const setOpenCodeBootstrapped = useWorkspaceStore(s => s.setOpenCodeBootstrapped);
-  const setOpenCodeReady = useWorkspaceStore(s => s.setOpenCodeReady);
 
   // ── Local state ───────────────────────────────────────────────────────
   const inputValue = draftInput;
@@ -218,21 +262,46 @@ export function ChatPanel({ compact = false }: ChatPanelProps) {
   // ── Provider store ────────────────────────────────────────────────────
   const currentModelKey = useProviderStore(s => s.currentModelKey);
   const initProviderStore = useProviderStore(s => s.initAll);
-  const selectedModelOption = useProviderStore((s) => getSelectedModelOption(s));
+  // Derive selected model from currentModelKey + models. Use useMemo with a
+  // ref to avoid returning a new object when the logical value hasn't changed.
+  // This prevents re-render cascades when initAll() rebuilds the models array
+  // with identical data (fixes TEAMCLAW-REACT-1R).
+  const providerModels = useProviderStore(s => s.models);
+  const selectedModelOptionRef = React.useRef<ModelOption | null>(null);
+  const selectedModelOption = React.useMemo(() => {
+    if (!currentModelKey) {
+      selectedModelOptionRef.current = null;
+      return null;
+    }
+    const idx = currentModelKey.indexOf('/');
+    if (idx < 0) {
+      selectedModelOptionRef.current = null;
+      return null;
+    }
+    const providerId = currentModelKey.substring(0, idx);
+    const modelId = currentModelKey.substring(idx + 1);
+    const found = providerModels.find((m) => m.provider === providerId && m.id === modelId) || null;
+    const prev = selectedModelOptionRef.current;
+    if (prev && found && prev.id === found.id && prev.provider === found.provider && prev.name === found.name) {
+      return prev; // stable reference
+    }
+    selectedModelOptionRef.current = found;
+    return found;
+  }, [currentModelKey, providerModels]);
 
   // ── Refs ───────────────────────────────────────────────────────────────
   const messageListRef = React.useRef<MessageListHandle>(null);
 
   // ── Derived values ────────────────────────────────────────────────────
-  const activeSession = useSessionStore(s =>
-    s.activeSessionId ? s.sessions.find((ss) => ss.id === s.activeSessionId) : undefined
+  const activeMessages = useSessionStore(s =>
+    s.activeSessionId ? s.sessions.find((ss) => ss.id === s.activeSessionId)?.messages : undefined
   );
   /** Shown messages lag store during fade so old session can fade out before swap */
   const [displaySessionId, setDisplaySessionId] = React.useState<string | null>(activeSessionId);
   const [sessionFadeOpacity, setSessionFadeOpacity] = React.useState(1);
 
-  const displaySession = useSessionStore((s) =>
-    displaySessionId ? s.sessions.find((ss) => ss.id === displaySessionId) : undefined,
+  const displayMessages = useSessionStore((s) =>
+    displaySessionId ? s.sessions.find((ss) => ss.id === displaySessionId)?.messages : undefined,
   );
 
   const SESSION_FADE_MS = 150;
@@ -299,10 +368,12 @@ export function ChatPanel({ compact = false }: ChatPanelProps) {
     (async () => {
       const { listen } = await import('@tauri-apps/api/event');
       unlisten = await listen<{ path: string; kind: string }>('file-change', (event) => {
-        if (!event.payload.path.includes(`${TEAMCLAW_DIR}/${CONFIG_FILE_NAME}`)) return;
+        const isTeamConfigChange = event.payload.path.includes(`${TEAMCLAW_DIR}/${CONFIG_FILE_NAME}`);
+        const isProviderMetaChange = event.payload.path.includes(`${TEAM_REPO_DIR}/_meta/provider.json`);
+        if (!isTeamConfigChange && !isProviderMetaChange) return;
         if (debounceTimer) clearTimeout(debounceTimer);
         debounceTimer = setTimeout(async () => {
-          console.log('[TeamMode] teamclaw.json changed, reloading team config');
+          console.log('[TeamMode] Team config changed, reloading team config');
           const store = useTeamModeStore.getState();
           const wasTeamMode = store.teamMode;
           await store.loadTeamConfig(workspacePath);
@@ -423,8 +494,8 @@ export function ChatPanel({ compact = false }: ChatPanelProps) {
   // Poll for pending permissions as fallback
   const pollPermissions = useSessionStore((s) => s.pollPermissions);
   const hasRunningTools = React.useMemo(() =>
-    (activeSession?.messages ?? []).some((m) => m.toolCalls?.some((tc) => tc.status === "calling" || tc.status === "waiting")),
-    [activeSession?.messages],
+    (activeMessages ?? []).some((m) => m.toolCalls?.some((tc) => tc.status === "calling" || tc.status === "waiting")),
+    [activeMessages],
   );
   React.useEffect(() => {
     if (!activeSessionId) return;
@@ -562,10 +633,16 @@ export function ChatPanel({ compact = false }: ChatPanelProps) {
     // Replace @{filepath} with [File: filepath] inline
     processedText = processedText.replace(/@\{([^}]+)\}/g, '[File: $1]');
 
-    // Replace /{skillname} with [Skill: skillname] inline
-    processedText = processedText.replace(/\/\{([^}]+)\}/g, '[Skill: $1]');
-
-    // Replace /[commandname] with [Command: commandname] inline
+    // Replace unified /{type:name} inline, while keeping legacy formats readable.
+    processedText = processedText.replace(/\/\{([^}]+)\}/g, (_full, body) => {
+      const token = parseSlashToken(body);
+      if (token.type === "role") return buildEnhancedChip("role", token.name);
+      if (token.type === "command") return `[Command: ${token.name}]`;
+      return buildEnhancedChip("skill", token.name);
+    });
+    processedText = processedText.replace(/\/<([a-z0-9]+(?:-[a-z0-9]+)*)>/g, (_full, roleName) =>
+      buildEnhancedChip("role", roleName),
+    );
     processedText = processedText.replace(/\/\[([^\]]+)\]/g, '[Command: $1]');
 
     const parts: string[] = [];
@@ -641,17 +718,9 @@ export function ChatPanel({ compact = false }: ChatPanelProps) {
   const handleRestartSkillsRuntime = React.useCallback(async () => {
     if (!workspacePath) return;
     setIsRestartingSkillsRuntime(true);
-    setOpenCodeBootstrapped(false);
     try {
-      await invoke("stop_opencode");
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      const status = await invoke<{ url: string }>("start_opencode", {
-        config: { workspace_path: workspacePath },
-      });
-      const { initOpenCodeClient } = await import("@/lib/opencode/sdk-client");
-      initOpenCodeClient({ baseUrl: status.url, workspacePath });
-      setOpenCodeBootstrapped(true, status.url);
-      setOpenCodeReady(true, status.url);
+      const { restartOpencode } = await import("@/lib/opencode/restart");
+      await restartOpencode(workspacePath);
       setHasSkillRestartPrompt(false);
     } catch (error) {
       console.error("[ChatPanel] Failed to restart OpenCode for skills:", error);
@@ -660,7 +729,7 @@ export function ChatPanel({ compact = false }: ChatPanelProps) {
     } finally {
       setIsRestartingSkillsRuntime(false);
     }
-  }, [workspacePath, setOpenCodeBootstrapped, setOpenCodeReady, setError]);
+  }, [workspacePath, setOpenCodeBootstrapped, setError]);
 
   // ── Empty state with suggestions ──────────────────────────────────────
   const emptyState = React.useMemo(() => (
@@ -711,14 +780,6 @@ export function ChatPanel({ compact = false }: ChatPanelProps) {
         compact ? "h-full w-full relative" : "absolute inset-0",
       )}
     >
-      {/* Connection status indicator */}
-      {!isConnected && activeSessionId && (
-        <div className="absolute top-2 right-2 z-20 flex items-center gap-2 rounded-full bg-yellow-100 px-3 py-1 text-xs text-yellow-800">
-          <Loader2 className="h-3 w-3 animate-spin" />
-          {t("chat.connecting", "Connecting...")}
-        </div>
-      )}
-
       {hasSkillRestartPrompt && (
         <div className="absolute top-2 left-1/2 z-20 flex w-[min(92vw,640px)] -translate-x-1/2 items-center gap-3 rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-900 shadow-sm">
           <AlertCircle className="h-4 w-4 shrink-0 text-sky-600" />
@@ -774,7 +835,7 @@ export function ChatPanel({ compact = false }: ChatPanelProps) {
             className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
           >
             <ArrowLeft size={14} />
-            <span>返回主会话</span>
+            <span>{t("chat.backToMainSession", "Back to main session")}</span>
           </button>
           <div className="flex items-center gap-1.5 ml-auto text-xs text-muted-foreground">
             <Bot size={12} />
@@ -828,7 +889,7 @@ export function ChatPanel({ compact = false }: ChatPanelProps) {
         ) : (
           <MessageList
             ref={messageListRef}
-            messages={displaySession?.messages ?? []}
+            messages={displayMessages ?? []}
             activeSessionId={displaySessionId}
             isStreaming={isStreaming}
             streamingMessageId={streamingMessageId}
@@ -840,40 +901,56 @@ export function ChatPanel({ compact = false }: ChatPanelProps) {
 
       {/* ─── Input Area (with Permission & Error UI above it) ─────────── */}
       {!isViewingChild && (
-        <ChatInputArea
-          compact={compact}
-          inputValue={inputValue}
-          onInputChange={handleInputChange}
-          attachedFiles={attachedFiles}
-              onFilesChange={handleFilesChange}
-          onRemoveFile={removeFile}
-          imageFiles={imageFiles}
-          onImageFilesChange={handleImageFilesChange}
-          onRemoveImageFile={removeImageFile}
-          onSubmit={handleSubmit}
-          isStreaming={isStreaming}
-          onAbort={abortSession}
-          messageQueue={messageQueue}
-          onRemoveFromQueue={removeFromQueue}
-          onHeightChange={handleInputHeightChange}
-          headerContent={
-            <>
-              <PendingPermissionInline />
-              {sessionError && (
-                <SessionErrorAlert
-                  error={sessionError}
-                  onDismiss={clearSessionError}
-                />
-              )}
-              {error && !sessionError && (
-                <SessionErrorAlert
-                  error={error}
-                  onDismiss={() => setError(null)}
-                />
-              )}
-            </>
-          }
-        />
+        activeInputQuestion ? (
+          <QuestionInputDock
+            compact={compact}
+            pendingQuestion={activeInputQuestion}
+            onHeightChange={handleInputHeightChange}
+          />
+        ) : (
+          <ChatInputArea
+            compact={compact}
+            inputValue={inputValue}
+            onInputChange={handleInputChange}
+            attachedFiles={attachedFiles}
+            onFilesChange={handleFilesChange}
+            onRemoveFile={removeFile}
+            imageFiles={imageFiles}
+            onImageFilesChange={handleImageFilesChange}
+            onRemoveImageFile={removeImageFile}
+            onSubmit={handleSubmit}
+            isStreaming={isStreaming}
+            onAbort={abortSession}
+            messageQueue={messageQueue}
+            onRemoveFromQueue={removeFromQueue}
+            onHeightChange={handleInputHeightChange}
+            headerContent={
+              <>
+                {showInlineTodo ? (
+                  <TodoList
+                    todos={todos}
+                    queue={messageQueue}
+                    onRemoveFromQueue={removeFromQueue}
+                    variant="inline"
+                  />
+                ) : null}
+                <PendingPermissionInline />
+                {sessionError && (
+                  <SessionErrorAlert
+                    error={sessionError}
+                    onDismiss={clearSessionError}
+                  />
+                )}
+                {error && !sessionError && (
+                  <SessionErrorAlert
+                    error={error}
+                    onDismiss={() => setError(null)}
+                  />
+                )}
+              </>
+            }
+          />
+        )
       )}
     </div>
   );

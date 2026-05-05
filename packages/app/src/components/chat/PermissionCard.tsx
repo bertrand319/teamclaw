@@ -1,22 +1,213 @@
 import * as React from "react"
-import { Shield, Terminal, FileText, FolderOpen, CornerDownLeft } from "lucide-react"
-import { cn, truncatePermissionSnippet } from "@/lib/utils"
+import { useTranslation } from "react-i18next"
+import { cn } from "@/lib/utils"
+import { resolvePendingPermissionActivityOwner } from "@/lib/session-list-activity"
 import { useSessionStore } from "@/stores/session"
-import { useStreamingStore } from "@/stores/streaming"
-import type { PendingPermissionEntry } from "@/stores/session-types"
+import type { PendingPermissionEntry, Session, ToolCallPermission } from "@/stores/session-types"
 
-const permissionMeta: Record<string, { icon: React.ComponentType<{ className?: string }>; title: string }> = {
-  bash: { icon: Terminal, title: "Run command" },
-  execute: { icon: Terminal, title: "Run command" },
-  write: { icon: FileText, title: "Write file" },
-  edit: { icon: FileText, title: "Edit file" },
-  read: { icon: FileText, title: "Read file" },
-  external_directory: { icon: FolderOpen, title: "Access external path" },
-  skill: { icon: Terminal, title: "Run skill" },
+const STACK_STEP_PX = 12
+const MAX_BACKPLATES = 2
+const CURRENT_CARD_OFFSET_PX = STACK_STEP_PX * MAX_BACKPLATES
+const CURRENT_CARD_HEIGHT_PX = 84
+const BACKPLATE_HEIGHT_PX = 72
+const STACK_CARD_WIDTH = "min(88vw,44rem)"
+const BACKPLATE_WIDTHS = ["min(86vw,42.25rem)", "min(82vw,40rem)"] as const
+
+type TranslateFn = (key: string, fallback?: string, options?: Record<string, unknown>) => string
+
+function translate(
+  t: ReturnType<typeof useTranslation>["t"],
+  key: string,
+  fallback?: string,
+  options?: Record<string, unknown>,
+) {
+  return (t as unknown as TranslateFn)(key, fallback, options)
 }
 
-function PermissionEntryCard({ entry }: { entry: PendingPermissionEntry }) {
-  const replyPermission = useSessionStore(s => s.replyPermission)
+function getPermissionMeta(t: TranslateFn): Record<string, { glyph: string; title: string; subject: string }> {
+  return {
+    bash: { glyph: ">", title: t("chat.permissionCard.requestExecuteCommand", "Request command execution"), subject: t("chat.toolCall.permission.bash", "Bash") },
+    execute: { glyph: ">", title: t("chat.permissionCard.requestExecuteCommand", "Request command execution"), subject: t("chat.toolCall.permission.bash", "Bash") },
+    write: { glyph: "✎", title: t("chat.permissionCard.requestWriteFile", "Request file write"), subject: t("permission.write", "Write") },
+    edit: { glyph: "✎", title: t("chat.permissionCard.requestEditFile", "Request file edit"), subject: t("permission.edit", "Edit") },
+    read: { glyph: "📄", title: t("chat.permissionCard.requestReadFile", "Request file read"), subject: t("permission.read", "Read") },
+    external_directory: { glyph: "📄", title: t("chat.permissionCard.requestAccessExternalPath", "Request external path access"), subject: t("permission.read", "Read") },
+    skill: { glyph: "⚡", title: t("chat.permissionCard.requestRunSkill", "Request skill run"), subject: t("chat.toolCall.skill.title", "Skill") },
+  }
+}
+
+function getSourceToolLabel(t: TranslateFn, sourceToolName?: string | null) {
+  if (!sourceToolName) return null
+  const normalized = sourceToolName.toLowerCase()
+  if (normalized.includes("bash") || normalized.includes("shell") || normalized.includes("terminal")) {
+    return t("chat.toolCall.permission.bash", "Bash")
+  }
+  if (normalized === "write") return t("permission.write", "Write")
+  if (normalized === "edit") return t("permission.edit", "Edit")
+  if (normalized === "read") return t("permission.read", "Read")
+  if (normalized === "skill") return t("chat.toolCall.skill.title", "Skill")
+  return sourceToolName
+}
+
+function truncateMiddle(value: string, maxLength: number, headLength: number, tailLength: number) {
+  if (value.length <= maxLength) return value
+  const head = value.slice(0, headLength).trimEnd()
+  const tail = value.slice(-tailLength).trimStart()
+  return `${head} ... ${tail}`
+}
+
+function summarizePermissionDetail(detail: string, permType: string) {
+  const normalized = detail.replace(/\s+/g, " ").trim()
+  if (!normalized) return detail
+
+  if (permType === "bash" || permType === "execute") {
+    return truncateMiddle(normalized, 92, 42, 24)
+  }
+
+  if (normalized.includes("/")) {
+    return truncateMiddle(normalized, 88, 22, 30)
+  }
+
+  return normalized.length > 88 ? truncateMiddle(normalized, 88, 40, 20) : normalized
+}
+
+function getPermissionCardPresentation(entry: PendingPermissionEntry, t: TranslateFn) {
+  const permType = entry.permission.permission || "write"
+  const isExternal = permType === "external_directory"
+  const permissionMeta = getPermissionMeta(t)
+  const baseMeta = permissionMeta[permType] || {
+    glyph: "•",
+    title: t("permission.request", "Request permission"),
+    subject: t("chat.toolCall.permission.tool", "Tool"),
+  }
+  const sourceToolLabel = getSourceToolLabel(t, entry.sourceToolName)
+  const meta = {
+    ...baseMeta,
+    subject: isExternal && sourceToolLabel ? sourceToolLabel : baseMeta.subject,
+  }
+
+  const metadata = entry.permission.metadata as Record<string, string> | undefined
+  const commandText = entry.permission.patterns?.join(" ") || ""
+  const filePath = metadata?.file || metadata?.filepath || ""
+  const skillName = metadata?.skill || metadata?.name || ""
+  const firstPattern = entry.permission.patterns?.[0] || ""
+
+  const detail = (() => {
+    if (permType === "bash" || permType === "execute") {
+      return commandText || firstPattern || permType
+    }
+    if (filePath) {
+      return filePath
+    }
+    if (permType === "skill") {
+      return skillName || firstPattern || t("chat.permissionCard.requestedSkill", "Requested skill")
+    }
+    if (firstPattern) {
+      return firstPattern
+    }
+    return permType
+  })()
+
+  const subtitle = isExternal
+    ? sourceToolLabel
+      ? t("chat.permissionCard.sourceToolInvocation", "来自 {{tool}} 工具调用", { tool: sourceToolLabel })
+      : t("chat.permissionCard.waitingExternalPathApproval", "读取工作区外路径前需要你的确认")
+    : entry.childSessionId
+      ? t("chat.permissionCard.childSessionWaitingApproval", "子会话正在等待你的审批")
+      : sourceToolLabel
+        ? t("chat.permissionCard.sourceToolInvocation", "来自 {{tool}} 工具调用", { tool: sourceToolLabel })
+        : t("chat.permissionCard.toolInvocationWaitingApproval", "工具调用正在等待你的审批")
+
+  return { meta, detail: summarizePermissionDetail(detail, permType), subtitle }
+}
+
+function buildPendingEntryFromToolPermission(
+  permission: ToolCallPermission,
+  sessionId: string,
+  sourceToolName?: string | null,
+  sourceToolCallId?: string | null,
+): PendingPermissionEntry {
+  return {
+    permission: {
+      id: permission.id,
+      sessionID: sessionId,
+      permission: permission.permission,
+      patterns: permission.patterns,
+      metadata: permission.metadata as Record<string, string> | undefined,
+      always: permission.always,
+    },
+    childSessionId: null,
+    sourceToolName: sourceToolName ?? null,
+    sourceToolCallId: sourceToolCallId ?? null,
+  }
+}
+
+function collectToolPendingPermissions(session: Session | null): PendingPermissionEntry[] {
+  if (!session) return []
+
+  const collected: PendingPermissionEntry[] = []
+  for (const message of session.messages) {
+    for (const toolCall of message.toolCalls || []) {
+      const permission = toolCall.permission
+      if (!permission) continue
+      if (permission.decision !== "pending") continue
+      if (toolCall.status !== "calling" && toolCall.status !== "waiting") continue
+      collected.push(buildPendingEntryFromToolPermission(permission, session.id, toolCall.name, toolCall.id))
+    }
+  }
+
+  return collected
+}
+
+export function collectVisiblePermissions(
+  activeSessionId: string | null,
+  sessions: Session[],
+  pendingPermissions: PendingPermissionEntry[],
+): PendingPermissionEntry[] {
+  const activeSession = activeSessionId
+    ? sessions.find((session) => session.id === activeSessionId) || null
+    : null
+
+  const toolPermissions = collectToolPendingPermissions(activeSession)
+  const visiblePendingPermissions = activeSessionId
+    ? pendingPermissions.filter(
+        (entry) => resolvePendingPermissionActivityOwner(entry, sessions) === activeSessionId,
+      )
+    : pendingPermissions
+  const merged = [...toolPermissions, ...visiblePendingPermissions]
+  const seen = new Set<string>()
+
+  return merged.filter((entry) => {
+    if (seen.has(entry.permission.id)) return false
+    seen.add(entry.permission.id)
+    return true
+  })
+}
+
+export function hasVisiblePendingPermissions(
+  activeSessionId: string | null,
+  sessions: Session[],
+  pendingPermissions: PendingPermissionEntry[],
+) {
+  return collectVisiblePermissions(activeSessionId, sessions, pendingPermissions).length > 0
+}
+
+function PermissionEntryCard({
+  entry,
+  pendingCount,
+  onReplyStart,
+  onReplyRollback,
+}: {
+  entry: PendingPermissionEntry
+  pendingCount: number
+  onReplyStart?: (permissionId: string) => void
+  onReplyRollback?: (permissionId: string) => void
+}) {
+  const { t: i18nT } = useTranslation()
+  const t = React.useCallback<TranslateFn>((key, fallback, options) => {
+    return translate(i18nT, key, fallback, options)
+  }, [i18nT])
+  const replyPermission = useSessionStore((s) => s.replyPermission)
   const [submitting, setSubmitting] = React.useState(false)
   const [decided, setDecided] = React.useState<string | null>(null)
 
@@ -26,129 +217,199 @@ function PermissionEntryCard({ entry }: { entry: PendingPermissionEntry }) {
     if (decided !== null) setDecided(null)
   }
 
-  const permType = entry.permission.permission || "write"
-  const isExternal = permType === "external_directory"
-  const meta = permissionMeta[permType] || { icon: Shield, title: "Permission required" }
-  const Icon = meta.icon
-  const isBash = permType === "bash" || permType === "execute"
-
-  const commandText = entry.permission.patterns?.join(" ") || ""
-  const metadata = entry.permission.metadata as Record<string, string> | undefined
-  const filePath = metadata?.file || metadata?.filepath || ""
-  const label = commandText.split(" ")[0] || permType
-  const allowListLabel = truncatePermissionSnippet(label, 42)
+  const { meta, detail, subtitle } = getPermissionCardPresentation(entry, t)
 
   const handleReply = async (d: "allow" | "deny" | "always") => {
     setSubmitting(true)
     setDecided(d)
+    onReplyStart?.(entry.permission.id)
     try {
       await replyPermission(entry.permission.id, d)
+    } catch (error) {
+      setDecided(null)
+      onReplyRollback?.(entry.permission.id)
+      throw error
     } finally {
       setSubmitting(false)
     }
   }
 
   const isPending = decided === null
+  if (!isPending) return null
 
   return (
-    <div className="pl-1 mt-1 mb-1.5 animate-in fade-in slide-in-from-bottom-2 duration-200">
-      <div className="rounded-lg border border-amber-500/30 bg-amber-50/50 dark:bg-amber-950/20 max-w-md overflow-hidden">
-        <div className="flex items-center gap-2 px-3 py-2">
-          <div className="p-1 rounded bg-amber-100 dark:bg-amber-900/40">
-            <Icon className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400" />
+    <div className="pointer-events-auto">
+      <div
+        data-testid="pending-permission-card"
+        className="h-[84px] w-full overflow-hidden rounded-[16px] border border-border/70 bg-card animate-in fade-in zoom-in-95 slide-in-from-bottom-4 duration-250 motion-reduce:animate-none"
+      >
+        <div className="px-3.5 py-2">
+          <div className="flex h-full items-start gap-3">
+            <div className="mt-0.5 flex h-7 w-7 items-center justify-center rounded-[9px] border border-[#e5eaf0] bg-[#f8fafc] text-[#64748b] dark:border-border dark:bg-muted dark:text-foreground">
+              <span className="text-[12px]">{meta.glyph}</span>
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="text-[13px] font-semibold text-foreground">{meta.subject} {meta.title}</div>
+                {pendingCount > 1 ? (
+                  <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+                    {t("chat.permissionCard.pendingCount", "{{count}} pending", { count: pendingCount })}
+                  </span>
+                ) : null}
+              </div>
+              <div
+                className="mt-0.5 overflow-hidden text-[12px] leading-5 text-foreground/85"
+                style={{ display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}
+              >
+                {detail}
+              </div>
+              <div className="truncate text-[11px] leading-5 text-muted-foreground">{subtitle}</div>
+            </div>
+            {isPending ? (
+              <div
+                data-testid="pending-permission-actions"
+                className="ml-auto flex shrink-0 items-center gap-2 self-start pt-0.5"
+              >
+                <button
+                  type="button"
+                  onClick={() => handleReply("deny")}
+                  disabled={submitting}
+                  className="shrink-0 rounded-[9px] border border-[#e5eaf0] bg-white px-[10px] py-[5px] text-[12px] font-medium text-[#475569] transition-colors hover:bg-muted/70 hover:text-foreground disabled:opacity-50 dark:border-border dark:bg-background dark:text-muted-foreground"
+                >
+                  {t("permission.deny", "拒绝")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleReply("always")}
+                  disabled={submitting}
+                  className="shrink-0 rounded-[9px] border border-[#e5eaf0] bg-white px-[10px] py-[5px] text-[12px] font-medium text-[#475569] transition-colors hover:bg-muted/70 hover:text-foreground disabled:opacity-50 dark:border-border dark:bg-background dark:text-muted-foreground"
+                >
+                  {t("permission.alwaysAllow", "总是允许")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleReply("allow")}
+                  disabled={submitting}
+                  className="shrink-0 rounded-[9px] bg-primary px-[10px] py-[5px] text-[12px] font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
+                >
+                  {t("chat.permissionCard.approve", "允许")}
+                </button>
+              </div>
+            ) : null}
           </div>
-          <div className="flex flex-col min-w-0">
-            <span className="text-xs font-medium text-foreground">{meta.title}</span>
-            {isExternal && (
-              <span className="text-[10px] text-amber-600 dark:text-amber-400">
-                Outside workspace — requires approval
-              </span>
-            )}
-          </div>
-          {!isPending && (
-            <span className={cn(
-              "ml-auto text-[10px] px-1.5 py-0.5 rounded font-medium shrink-0",
-              decided === "deny"
-                ? "bg-red-500/10 text-red-600 dark:text-red-400"
-                : "bg-green-500/10 text-green-600 dark:text-green-400",
-            )}>
-              {decided === "deny" ? "Denied" : decided === "always" ? "Allowlisted" : "Allowed"}
-            </span>
-          )}
         </div>
-
-        {isBash && commandText ? (
-          <div className="px-3 pb-2">
-            <div className="flex items-start gap-2 rounded bg-muted/60 px-2 py-1.5">
-              <span className="text-muted-foreground select-none shrink-0 text-xs">$</span>
-              <code className="text-xs font-mono text-foreground break-all">{commandText}</code>
-            </div>
-          </div>
-        ) : filePath ? (
-          <div className="px-3 pb-2">
-            <code className="text-xs font-mono text-muted-foreground break-all">{filePath}</code>
-          </div>
-        ) : null}
-
-        {isPending && (
-          <div className="flex min-w-0 items-center gap-2 px-3 py-2 border-t border-amber-500/20">
-            <button
-              type="button"
-              onClick={() => handleReply("deny")}
-              disabled={submitting}
-              className="text-xs text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50 shrink-0"
-            >
-              Deny
-            </button>
-            <div className="ml-auto flex min-w-0 shrink items-center justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => handleReply("always")}
-                disabled={submitting}
-                title={label}
-                className="min-w-0 max-w-[min(100%,14rem)] shrink truncate text-left text-xs bg-muted hover:bg-muted/80 text-muted-foreground px-2.5 py-1 rounded transition-colors disabled:opacity-50"
-              >
-                Always allow &apos;{allowListLabel}&apos;
-              </button>
-              <button
-                type="button"
-                onClick={() => handleReply("allow")}
-                disabled={submitting}
-                className="shrink-0 text-xs bg-primary hover:bg-primary/90 text-primary-foreground px-2.5 py-1 rounded font-medium flex items-center gap-1.5 transition-colors disabled:opacity-50"
-              >
-                Allow
-                <CornerDownLeft size={12} />
-              </button>
-            </div>
-          </div>
-        )}
       </div>
     </div>
   )
 }
 
 /**
- * Fallback inline permission card for the rare case where a permission
- * has no tool.callID (floating permission). Tool-call-based permissions
- * are handled by PermissionApprovalBar inside each ToolCallCard.
+ * Unified permission approval stack rendered above the input area.
+ * Includes both tool-attached permissions from the active session and
+ * child-session/floating permissions queued in the global store.
  */
 export function PendingPermissionInline() {
-  const pendingPermissions = useSessionStore(s => s.pendingPermissions)
-  const childSessionStreaming = useStreamingStore(s => s.childSessionStreaming)
+  const { t: i18nT } = useTranslation()
+  const t = React.useCallback<TranslateFn>((key, fallback, options) => {
+    return translate(i18nT, key, fallback, options)
+  }, [i18nT])
+  const activeSessionId = useSessionStore((s) => s.activeSessionId)
+  const sessions = useSessionStore((s) => s.sessions)
+  const pendingPermissions = useSessionStore((s) => s.pendingPermissions)
+  const [dismissedIds, setDismissedIds] = React.useState<string[]>([])
 
-  // Filter to only child session permissions whose child session is still alive
-  const visiblePermissions = pendingPermissions.filter(entry => {
-    if (!entry.childSessionId) return false // Parent session permissions go through PermissionApprovalBar
-    return !!childSessionStreaming[entry.childSessionId]
-  })
+  const baseVisiblePermissions = React.useMemo(
+    () => collectVisiblePermissions(activeSessionId, sessions, pendingPermissions),
+    [activeSessionId, pendingPermissions, sessions],
+  )
+
+  React.useEffect(() => {
+    setDismissedIds((current) => current.filter((id) => baseVisiblePermissions.some((entry) => entry.permission.id === id)))
+  }, [baseVisiblePermissions])
+
+  const visiblePermissions = React.useMemo(
+    () => baseVisiblePermissions.filter((entry) => !dismissedIds.includes(entry.permission.id)),
+    [baseVisiblePermissions, dismissedIds],
+  )
 
   if (visiblePermissions.length === 0) return null
 
+  const currentEntry = visiblePermissions[0]
+  const queuedCount = visiblePermissions.length
+  const backplateCount = Math.min(Math.max(queuedCount - 1, 0), MAX_BACKPLATES)
+  const currentOffset = CURRENT_CARD_OFFSET_PX
+  const stackHeight = currentOffset + CURRENT_CARD_HEIGHT_PX
+
   return (
-    <div className="space-y-1">
-      {visiblePermissions.map(entry => (
-        <PermissionEntryCard key={entry.permission.id} entry={entry} />
-      ))}
+    <div
+      data-testid="pending-permission-inline"
+      className="relative z-0 mx-auto mb-0 mt-0 flex w-[min(92vw,48rem)] justify-center"
+    >
+      <div className="w-full px-0">
+        <div className="relative" style={{ minHeight: stackHeight }}>
+          {Array.from({ length: backplateCount }).map((_, index) => {
+            const queuedEntry = visiblePermissions[index + 1]
+            const presentation = queuedEntry ? getPermissionCardPresentation(queuedEntry, t) : null
+            const bottom = (backplateCount - index) * STACK_STEP_PX
+
+            return (
+              <div
+                key={`backplate-${index}`}
+                data-testid="pending-permission-backplate"
+                aria-hidden="true"
+                className={cn(
+                  "pointer-events-none absolute left-1/2 overflow-hidden rounded-[16px] border transition-all duration-300 ease-out",
+                  index === 0 && "border-border/60 bg-card opacity-70",
+                  index === 1 && "border-border/65 bg-card opacity-84",
+                )}
+                style={{
+                  bottom: `${bottom}px`,
+                  width: BACKPLATE_WIDTHS[index] ?? STACK_CARD_WIDTH,
+                  transform: "translateX(-50%)",
+                  height: `${BACKPLATE_HEIGHT_PX}px`,
+                }}
+              >
+                {presentation ? (
+                  <div className="flex h-full items-start gap-3 px-3.5 py-2">
+                    <div className="flex h-6 w-6 items-center justify-center rounded-[8px] border border-[#e5eaf0] bg-[#f8fafc] text-[#64748b] dark:border-border dark:bg-muted dark:text-foreground">
+                      <span className="text-[12px]">{presentation.meta.glyph}</span>
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="text-[13px] text-foreground/90">
+                        <strong>{presentation.meta.subject}</strong> {presentation.meta.title}
+                      </div>
+                      {index === 0 ? (
+                        <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
+                          {presentation.subtitle}
+                        </div>
+                      ) : null}
+                      <div className="truncate text-[11px] leading-5 text-muted-foreground/90">
+                        {presentation.detail}
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            )
+          })}
+          <div
+            data-testid="pending-permission-current"
+            className="absolute bottom-0 left-1/2 z-[1] transition-all duration-300 ease-out"
+            style={{ width: STACK_CARD_WIDTH, transform: "translateX(-50%)" }}
+          >
+            <PermissionEntryCard
+              entry={currentEntry}
+              pendingCount={queuedCount}
+              onReplyStart={(permissionId) => {
+                setDismissedIds((current) => current.includes(permissionId) ? current : [...current, permissionId])
+              }}
+              onReplyRollback={(permissionId) => {
+                setDismissedIds((current) => current.filter((id) => id !== permissionId))
+              }}
+            />
+          </div>
+        </div>
+      </div>
     </div>
   )
 }

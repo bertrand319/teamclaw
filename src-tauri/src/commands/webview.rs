@@ -1,9 +1,128 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
-use tauri::Manager;
+use tauri::{Manager, Runtime};
 
-/// Chrome-like user agent so websites serve normal desktop content.
-const CHROME_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+/// Safari user agent matching the actual WKWebView engine.
+/// Chrome UA causes blank pages — servers may return Chrome-specific responses
+/// (e.g. Brotli encoding, different JS bundles) that WKWebView can't handle.
+const WEBVIEW_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15";
+const EXTERNAL_WEBVIEW_INIT_SCRIPT: &str = r#"(function(){
+  // Tauri notification plugin defines Notification.permission as readonly and throws
+  // on direct assignment. Some external sites attempt this write and would otherwise
+  // surface noisy unhandled rejections inside embedded webviews.
+  function suppressReadonlyPermissionError(evt) {
+    try {
+      var reason = evt && evt.reason;
+      var message = reason && reason.message ? String(reason.message) : String(reason || '');
+      if (message !== 'Readonly property' && message !== 'Error: Readonly property') {
+        return;
+      }
+      var stack = reason && reason.stack ? String(reason.stack) : '';
+      if (stack && stack.indexOf('notification') === -1 && stack.indexOf('user-script') === -1) {
+        return;
+      }
+      evt.preventDefault();
+    } catch (_) {}
+  }
+
+  window.addEventListener('unhandledrejection', suppressReadonlyPermissionError, true);
+
+  function installSafeNotificationWrapper() {
+    try {
+      if (!window.Notification) return;
+
+      function wrapNotification(candidate) {
+        if (typeof candidate !== 'function' || candidate.__TEAMCLAW_SAFE_NOTIFICATION__) {
+          return candidate;
+        }
+
+        var permission = 'default';
+        try {
+          permission = candidate.permission == null ? 'default' : String(candidate.permission);
+        } catch (_) {}
+
+        function SafeNotification(title, options) {
+          try {
+            return new candidate(title, options);
+          } catch (_) {
+            return candidate.apply(this, arguments);
+          }
+        }
+
+        try { SafeNotification.prototype = candidate.prototype; } catch (_) {}
+        try {
+          Object.getOwnPropertyNames(candidate).forEach(function(key) {
+            if (key === 'permission' || key === 'prototype' || key === 'length' || key === 'name') {
+              return;
+            }
+            try {
+              Object.defineProperty(SafeNotification, key, Object.getOwnPropertyDescriptor(candidate, key));
+            } catch (_) {}
+          });
+        } catch (_) {}
+
+        Object.defineProperty(SafeNotification, 'permission', {
+          enumerable: true,
+          configurable: true,
+          get: function() { return permission; },
+          set: function(next) {
+            permission = next == null ? 'default' : String(next);
+            try { candidate.permission = next; } catch (_) {}
+          }
+        });
+        Object.defineProperty(SafeNotification, '__TEAMCLAW_SAFE_NOTIFICATION__', {
+          value: true,
+          configurable: false
+        });
+        return SafeNotification;
+      }
+
+      var currentNotification = wrapNotification(window.Notification);
+      Object.defineProperty(window, 'Notification', {
+        enumerable: true,
+        configurable: true,
+        get: function() { return currentNotification; },
+        set: function(next) { currentNotification = wrapNotification(next); }
+      });
+    } catch (_) {}
+  }
+
+  installSafeNotificationWrapper();
+
+  function navigateHere(href) {
+    try {
+      window.top.location.href = href;
+    } catch (_) {
+      window.location.href = href;
+    }
+  }
+  document.addEventListener('click', function(e) {
+    var a = e.target.closest && e.target.closest('a');
+    if (!a) return;
+    var t = a.getAttribute('target');
+    if (t && t !== '_self') {
+      var href = a.href || a.getAttribute('href');
+      if (href && /^https?:\/\//.test(href)) {
+        e.preventDefault();
+        e.stopPropagation();
+        navigateHere(href);
+      }
+    }
+  }, true);
+  var _open = window.open;
+  var _interceptOpen = function(url) {
+    if (url && /^https?:\/\//.test(String(url))) {
+      navigateHere(String(url));
+      return window;
+    }
+    return _open.apply(this, arguments);
+  };
+  try {
+    Object.defineProperty(window, 'open', {
+      value: _interceptOpen, writable: true, configurable: true
+    });
+  } catch (_) {}
+})();"#;
 
 /// Send-safe wrapper around a retained ObjC WKWebViewConfiguration pointer.
 #[cfg(target_os = "macos")]
@@ -24,7 +143,7 @@ impl Drop for SharedConfig {
 
 /// State to track child webview labels.
 pub struct WebviewManager {
-    labels: Mutex<HashMap<String, ()>>,
+    pub labels: Mutex<HashMap<String, ()>>,
     /// Shared WKWebViewConfiguration so all external webviews share the same
     /// WKProcessPool (in-memory cookies) and WKWebsiteDataStore (persistent cookies).
     #[cfg(target_os = "macos")]
@@ -40,6 +159,134 @@ impl Default for WebviewManager {
         }
     }
 }
+
+fn build_teamclaw_identity_script(
+    device_no: &str,
+    device_name: &str,
+    device_token: Option<String>,
+) -> String {
+    let escaped_no = serde_json::to_string(device_no).unwrap_or_else(|_| "\"\"".to_string());
+    let escaped_name = serde_json::to_string(device_name).unwrap_or_else(|_| "\"\"".to_string());
+    let escaped_token = match device_token {
+        Some(token) => serde_json::to_string(&token).unwrap_or_else(|_| "null".to_string()),
+        None => "null".to_string(),
+    };
+
+    format!(
+        r#"(function(){{
+  var __next = {{ deviceNo: {no}, deviceName: {name}, deviceToken: {token} }};
+  if (typeof window.__TEAMCLAW_SET_IDENTITY__ !== 'function') {{
+    var __state = {{ deviceNo: '', deviceName: '', deviceToken: null }};
+    Object.defineProperty(window, '__TEAMCLAW_SET_IDENTITY__', {{
+      value: function(next) {{
+        __state.deviceNo = next && next.deviceNo ? next.deviceNo : '';
+        __state.deviceName = next && next.deviceName ? next.deviceName : '';
+        __state.deviceToken = next ? next.deviceToken : null;
+      }},
+      writable: false,
+      enumerable: false,
+      configurable: true
+    }});
+    // Capture native Storage methods before any page script can monkey-patch them.
+    // Pages that detect window.teamclaw sometimes wrap localStorage in a way that
+    // breaks keys containing hyphens (e.g. "active-eruda"). Binding to
+    // Storage.prototype here — at document start — preserves the original behaviour.
+    var __nativeStorage;
+    try {{
+      var __si = Storage.prototype.setItem;
+      var __gi = Storage.prototype.getItem;
+      var __ri = Storage.prototype.removeItem;
+      var __cl = Storage.prototype.clear;
+      __nativeStorage = Object.freeze({{
+        setItem:    function(k, v) {{ return __si.call(localStorage, k, v); }},
+        getItem:    function(k)    {{ return __gi.call(localStorage, k);    }},
+        removeItem: function(k)    {{ return __ri.call(localStorage, k);    }},
+        clear:      function()     {{ return __cl.call(localStorage);       }},
+      }});
+    }} catch(_) {{
+      __nativeStorage = null;
+    }}
+    Object.defineProperty(window, 'teamclaw', {{
+      value: Object.freeze({{
+        get deviceNo() {{ return __state.deviceNo; }},
+        get deviceName() {{ return __state.deviceName; }},
+        get deviceToken() {{ return __state.deviceToken; }},
+        get nativeStorage() {{ return __nativeStorage; }},
+      }}),
+      writable: false,
+      enumerable: true,
+      configurable: true
+    }});
+  }}
+  window.__TEAMCLAW_SET_IDENTITY__(__next);
+}})();"#,
+        no = escaped_no,
+        name = escaped_name,
+        token = escaped_token,
+    )
+}
+
+fn build_teamclaw_identity_script_with_fresh_token(device_no: &str, device_name: &str) -> String {
+    let device_token = match super::device_token::generate(device_no, "") {
+        Ok(token) => Some(token),
+        Err(e) => {
+            eprintln!("[Webview] device_token generation skipped: {}", e);
+            None
+        }
+    };
+    build_teamclaw_identity_script(device_no, device_name, device_token)
+}
+
+#[cfg(target_os = "macos")]
+fn add_document_start_script<R: Runtime>(webview: &tauri::Webview<R>, script: &str) {
+    let script = script.to_string();
+    if let Err(e) = webview.with_webview(move |wv| {
+        use objc2::runtime::AnyObject;
+        use objc2::{class, msg_send};
+        use std::ffi::CString;
+
+        let Ok(script) = CString::new(script) else {
+            return;
+        };
+
+        unsafe {
+            let wk_webview: *const AnyObject = wv.inner().cast();
+            let config: *const AnyObject = msg_send![wk_webview, configuration];
+            if config.is_null() {
+                return;
+            }
+            let controller: *const AnyObject = msg_send![config, userContentController];
+            if controller.is_null() {
+                return;
+            }
+            let source: *const AnyObject =
+                msg_send![class!(NSString), stringWithUTF8String: script.as_ptr()];
+            if source.is_null() {
+                return;
+            }
+            let allocated: *mut AnyObject = msg_send![class!(WKUserScript), alloc];
+            if allocated.is_null() {
+                return;
+            }
+            let user_script: *mut AnyObject = msg_send![
+                allocated,
+                initWithSource: source,
+                injectionTime: 0isize,
+                forMainFrameOnly: true
+            ];
+            if user_script.is_null() {
+                return;
+            }
+            let _: () = msg_send![controller, addUserScript: user_script];
+            objc2::ffi::objc_release(user_script as *mut _);
+        }
+    }) {
+        eprintln!("[Webview] Failed to refresh document-start identity script: {e}");
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn add_document_start_script<R: Runtime>(_webview: &tauri::Webview<R>, _script: &str) {}
 
 /// Create a shared WKWebViewConfiguration on the main thread.
 /// Must be called from Tauri's builder chain or setup() which run on the main thread.
@@ -64,24 +311,28 @@ pub fn init_shared_config(manager: &mut WebviewManager) {
         let data_store = WKWebsiteDataStore::defaultDataStore(mtm);
         config.setWebsiteDataStore(&data_store);
 
-        // Disable "Inspect Element" in the native context menu.
-        // The docked Web Inspector breaks our layout because it attempts to
-        // resize the WKWebView to accommodate itself, overflowing outside the
-        // panel bounds we set via webview_set_bounds. Users who need devtools
-        // can use Tauri's own devtools (Cmd+Option+I on the main window).
+        // Keep Safari Web Inspector available in release builds too.
+        // If this causes layout issues in specific scenarios, users can disable
+        // it via TEAMCLAW_DISABLE_WEBVIEW_DEVTOOLS=1 when launching the app.
         let prefs = config.preferences();
         let prefs_ptr: *mut AnyObject = objc2::rc::Retained::as_ptr(&prefs) as *mut AnyObject;
-        let ns_false: *mut AnyObject = msg_send![class!(NSNumber), numberWithBool: false];
+        let disable_devtools = std::env::var("TEAMCLAW_DISABLE_WEBVIEW_DEVTOOLS")
+            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+            .unwrap_or(false);
+        let ns_bool: *mut AnyObject =
+            msg_send![class!(NSNumber), numberWithBool: !disable_devtools];
         let key_str = std::ffi::CString::new("developerExtrasEnabled").unwrap();
         let key_ns: *mut AnyObject =
             msg_send![class!(NSString), stringWithUTF8String: key_str.as_ptr()];
-        let _: () = msg_send![prefs_ptr, setValue: ns_false, forKey: key_ns];
+        let _: () = msg_send![prefs_ptr, setValue: ns_bool, forKey: key_ns];
 
         let raw = objc2::rc::Retained::as_ptr(&config) as *const std::ffi::c_void;
         objc2::ffi::objc_retain(raw as *mut _);
         manager.shared_config = Some(SharedConfig(raw));
     }
-    eprintln!("[Webview] Shared WKWebViewConfiguration initialized on main thread (defaultDataStore + shared pool, devtools disabled)");
+    eprintln!(
+        "[Webview] Shared WKWebViewConfiguration initialized on main thread (defaultDataStore + shared pool, devtools enabled by default)"
+    );
 }
 
 /// Execute JavaScript in the main webview and return the stringified result.
@@ -161,7 +412,7 @@ pub async fn webview_eval_js(app: tauri::AppHandle, code: String) -> Result<Stri
     }
 }
 
-/// Create a native webview as a child of the main window at the given position.
+/// Create a native webview as a child of the calling window at the given position.
 ///
 /// When `device_no` and `device_name` are provided, a `window.teamclaw` global
 /// is injected into the webview before any page scripts run, exposing identity
@@ -169,6 +420,7 @@ pub async fn webview_eval_js(app: tauri::AppHandle, code: String) -> Result<Stri
 #[tauri::command]
 pub async fn webview_create(
     app: tauri::AppHandle,
+    window: tauri::Window,
     state: tauri::State<'_, WebviewManager>,
     label: String,
     url: String,
@@ -206,23 +458,25 @@ pub async fn webview_create(
         }
     }
 
-    let window = app
-        .get_window("main")
-        .ok_or_else(|| "Main window not found".to_string())?;
-
     let parsed_url = url
         .parse::<tauri::Url>()
         .map_err(|e| format!("Invalid URL '{}': {}", url, e))?;
 
     eprintln!(
-        "[Webview] Creating '{}' url={} pos=({},{}) size={}x{}",
-        label, url, x, y, width, height
+        "[Webview] Creating '{}' in parent '{}' url={} pos=({},{}) size={}x{}",
+        label,
+        window.label(),
+        url,
+        x,
+        y,
+        width,
+        height
     );
 
     #[allow(unused_mut)]
     let mut webview_builder =
         tauri::webview::WebviewBuilder::new(&label, tauri::WebviewUrl::External(parsed_url))
-            .user_agent(CHROME_UA);
+            .user_agent(WEBVIEW_UA);
 
     // On macOS, use the shared WKWebViewConfiguration so all webviews share
     // the same WKProcessPool → cookies/session shared instantly across tabs.
@@ -240,38 +494,45 @@ pub async fn webview_create(
         }
     }
 
-    // Intercept target="_blank" links and window.open() so they navigate
-    // within the same webview instead of opening the system browser.
-    webview_builder = webview_builder.initialization_script(
-        r#"(function(){
-  document.addEventListener('click', function(e) {
-    var a = e.target.closest && e.target.closest('a');
-    if (!a) return;
-    var t = a.getAttribute('target');
-    if (t && t !== '_self') {
-      var href = a.href || a.getAttribute('href');
-      if (href && /^https?:\/\//.test(href)) {
-        e.preventDefault();
-        e.stopPropagation();
-        window.location.href = href;
-      }
+    // Intercept target="_blank" links and window.open() so OAuth popups
+    // remain in the same native webview. Run in all frames because OAuth
+    // widgets often live inside iframes.
+    webview_builder =
+        webview_builder.initialization_script_for_all_frames(EXTERNAL_WEBVIEW_INIT_SCRIPT);
+
+    // Native fallback for popup requests that bypass our JS hook.
+    {
+        let popup_label = label.clone();
+        let popup_app = app.clone();
+        webview_builder = webview_builder.on_new_window(move |url, _features| {
+            if matches!(url.scheme(), "http" | "https") {
+                eprintln!(
+                    "[Webview] Redirecting popup request for '{}' to {}",
+                    popup_label, url
+                );
+                if let Some(webview) = popup_app.get_webview(&popup_label) {
+                    let _ = webview.navigate(url.clone());
+                }
+            }
+            tauri::webview::NewWindowResponse::Deny
+        });
     }
-  }, true);
-  var _open = window.open;
-  window.open = function(url) {
-    if (url && /^https?:\/\//.test(String(url))) {
-      window.location.href = String(url);
-      return window;
-    }
-    return _open.apply(this, arguments);
-  };
-})();"#,
-    );
+
+    // Inject as long as we have a device ID. Device name is a display-only
+    // string — empty is fine and must not block the JWT/storage shim.
+    let identity = device_no
+        .as_deref()
+        .filter(|dno| !dno.is_empty())
+        .map(|dno| (dno.to_string(), device_name.clone().unwrap_or_default()));
+    let initial_identity_script = identity
+        .as_ref()
+        .map(|(dno, dname)| build_teamclaw_identity_script_with_fresh_token(dno, dname));
 
     // Page load progress via on_page_load callback (no JS injection needed —
     // child webviews don't have __TAURI_INTERNALS__)
     {
         let progress_label = label.clone();
+        let identity = identity.clone();
         webview_builder = webview_builder.on_page_load(move |webview, payload| {
             use tauri::Emitter;
             let progress = match payload.event() {
@@ -285,36 +546,29 @@ pub async fn webview_create(
                     "progress": progress
                 }),
             );
+
+            if let Some((device_no, device_name)) = &identity {
+                let script =
+                    build_teamclaw_identity_script_with_fresh_token(device_no, device_name);
+                match payload.event() {
+                    tauri::webview::PageLoadEvent::Started => {
+                        add_document_start_script(&webview, &script);
+                    }
+                    tauri::webview::PageLoadEvent::Finished => {
+                        let _ = webview.eval(&script);
+                    }
+                }
+            }
         });
     }
 
     // Right-click: rely on the native WKWebView / WebView2 context menu.
     // No custom init script needed — native menus provide Copy/Paste/Look Up/etc.
 
-    // Inject window.teamclaw identity global before any page scripts run.
-    // Non-fatal: if device_token generation fails (e.g. DEVICE_JWT_SECRET not configured),
-    // the webview still loads — just without the identity global.
-    if let (Some(ref dno), Some(ref dname)) = (&device_no, &device_name) {
-        match super::device_token::generate(dno, "") {
-            Ok(device_token) => {
-                let escaped_no =
-                    serde_json::to_string(dno).unwrap_or_else(|_| "\"\"".to_string());
-                let escaped_name =
-                    serde_json::to_string(dname).unwrap_or_else(|_| "\"\"".to_string());
-                let escaped_token =
-                    serde_json::to_string(&device_token).unwrap_or_else(|_| "\"\"".to_string());
-                let script = format!(
-                    "Object.defineProperty(window, 'teamclaw', {{ value: Object.freeze({{ deviceNo: {no}, deviceName: {name}, deviceToken: {token} }}), writable: false, configurable: false }});",
-                    no = escaped_no,
-                    name = escaped_name,
-                    token = escaped_token,
-                );
-                webview_builder = webview_builder.initialization_script(&script);
-            }
-            Err(e) => {
-                eprintln!("[Webview] Skipping device_token injection: {}", e);
-            }
-        }
+    // Inject window.teamclaw before page scripts run. The object is stable but
+    // its getters read refreshed values after OAuth redirects and page reloads.
+    if let Some(script) = initial_identity_script {
+        webview_builder = webview_builder.initialization_script(&script);
     }
 
     let webview = window
@@ -542,10 +796,7 @@ pub async fn webview_get_favicon(app: tauri::AppHandle, label: String) -> Result
         let url = webview.url().map_err(|e| format!("{}", e))?;
         if let Some(host) = url.host_str() {
             let scheme = url.scheme();
-            let port = url
-                .port()
-                .map(|p| format!(":{}", p))
-                .unwrap_or_default();
+            let port = url.port().map(|p| format!(":{}", p)).unwrap_or_default();
             return Ok(format!("{}://{}{}/favicon.ico", scheme, host, port));
         }
     }
@@ -602,3 +853,44 @@ pub async fn webview_set_zoom(
 
 // Context menu: using native WKWebView / WebView2 built-in context menu.
 // No custom Rust handler needed — the native menu provides Copy/Paste/Look Up/etc.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn teamclaw_identity_script_is_refreshable() {
+        let script =
+            build_teamclaw_identity_script("device-1", "Alice", Some("token-1".to_string()));
+
+        assert!(script.contains("__TEAMCLAW_SET_IDENTITY__"));
+        assert!(script.contains("get deviceToken()"));
+        assert!(script.contains("configurable: true"));
+        assert!(script.contains("\"device-1\""));
+        assert!(script.contains("\"Alice\""));
+        assert!(script.contains("\"token-1\""));
+    }
+
+    #[test]
+    fn teamclaw_identity_script_escapes_values_and_allows_missing_token() {
+        let script = build_teamclaw_identity_script("device\"quoted", "name\nline", None);
+
+        assert!(script.contains("device\\\"quoted"));
+        assert!(script.contains("name\\nline"));
+        assert!(script.contains("deviceToken: null"));
+    }
+
+    #[test]
+    fn external_webview_init_script_suppresses_notification_readonly_rejection() {
+        assert!(EXTERNAL_WEBVIEW_INIT_SCRIPT.contains("unhandledrejection"));
+        assert!(EXTERNAL_WEBVIEW_INIT_SCRIPT.contains("Readonly property"));
+        assert!(EXTERNAL_WEBVIEW_INIT_SCRIPT.contains("evt.preventDefault()"));
+    }
+
+    #[test]
+    fn external_webview_init_script_wraps_notification_permission_setter() {
+        assert!(EXTERNAL_WEBVIEW_INIT_SCRIPT.contains("__TEAMCLAW_SAFE_NOTIFICATION__"));
+        assert!(EXTERNAL_WEBVIEW_INIT_SCRIPT.contains("function SafeNotification"));
+        assert!(EXTERNAL_WEBVIEW_INIT_SCRIPT.contains("set: function(next)"));
+    }
+}

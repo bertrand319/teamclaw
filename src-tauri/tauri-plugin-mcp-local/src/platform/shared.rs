@@ -11,7 +11,9 @@ where
     // Execute the platform-specific screenshot function in a blocking task
     let result = tokio::task::spawn_blocking(screenshot_fn)
         .await
-        .map_err(|e| Error::window_operation_failed("screenshot task", format!("Task join error: {}", e)))?;
+        .map_err(|e| {
+            Error::window_operation_failed("screenshot task", format!("Task join error: {}", e))
+        })?;
 
     // Handle the result consistently across platforms
     match result {
@@ -21,6 +23,7 @@ where
 }
 
 // Helper function to get window title - used by multiple platforms
+#[allow(dead_code)]
 pub fn get_window_title<R: Runtime>(window: &tauri::WebviewWindow<R>) -> Result<String> {
     match window.title() {
         Ok(title) => Ok(title),

@@ -132,36 +132,32 @@ export function WebViewContent({ url: rawUrl }: WebViewContentProps) {
             // Create new native webview
             setIsLoading(true)
 
-            // Resolve device identity for window.teamclaw injection.
-            // Always inject: use the persistent fallback device ID so the
-            // JWT device_token is available regardless of teamMode / P2P state.
+            // Device ID is the persistent iroh node_id (derived from a local key
+            // file) — it does not depend on the P2P node being up, so racing P2P
+            // here is wasted latency. Always read it directly.
             let deviceNo: string | undefined
-            let deviceName: string | undefined
             try {
-              // Prefer the P2P node ID when teamMode is active and P2P is running;
-              // always fall back to the stable persisted UUID.
-              if (useTeamModeStore.getState().teamMode) {
-                try {
-                  const info = await Promise.race([
-                    invoke<{ nodeId: string }>("get_device_info"),
-                    new Promise<never>((_, reject) =>
-                      setTimeout(() => reject(new Error("timeout")), 500),
-                    ),
-                  ])
-                  deviceNo = info.nodeId
-                  const members = useTeamMembersStore.getState().members
-                  const me = members.find((m) => m.nodeId === deviceNo)
-                  deviceName = me?.name ?? ""
-                } catch {
-                  // P2P not running — fall through to persistent ID below
-                }
+              deviceNo = await invoke<string>("get_persistent_device_id")
+            } catch (err) {
+              console.error("[WebView] get_persistent_device_id failed:", err)
+            }
+
+            // Device name is purely a display value and must NOT gate injection:
+            // prefer the team member display name when available, fall back to
+            // hostname, accept empty if both fail.
+            let deviceName = ""
+            try {
+              if (deviceNo && useTeamModeStore.getState().teamMode) {
+                const me = useTeamMembersStore
+                  .getState()
+                  .members.find((m) => m.nodeId === deviceNo)
+                if (me?.name) deviceName = me.name
               }
-              if (!deviceNo) {
-                deviceNo = await invoke<string>("get_persistent_device_id")
-                deviceName = deviceName ?? ""
+              if (!deviceName) {
+                deviceName = await invoke<string>("get_device_hostname")
               }
             } catch {
-              // Non-critical: webview works without identity
+              // Empty deviceName is acceptable; injection still happens.
             }
 
             await invoke("webview_create", {

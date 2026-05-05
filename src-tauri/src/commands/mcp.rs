@@ -12,6 +12,7 @@ use tokio::process::Command as TokioCommand;
 use tokio::time::timeout;
 
 use super::opencode::OpenCodeState;
+use crate::process_util::CommandNoWindow;
 
 /// MCP Server configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,14 +86,9 @@ pub(crate) fn write_config(
 #[tauri::command]
 pub async fn get_mcp_config(
     state: State<'_, OpenCodeState>,
+    workspace_path: Option<String>,
 ) -> Result<IndexMap<String, MCPServerConfig>, String> {
-    let workspace_path = state
-        .inner
-        .lock()
-        .map_err(|e| e.to_string())?
-        .workspace_path
-        .clone()
-        .ok_or("No workspace path set. Please select a workspace first.")?;
+    let workspace_path = crate::commands::team::resolve_workspace_path(workspace_path, &state)?;
 
     let config = read_config(&workspace_path)?;
     Ok(config.mcp.unwrap_or_default())
@@ -103,14 +99,9 @@ pub async fn get_mcp_config(
 pub async fn save_mcp_config(
     state: State<'_, OpenCodeState>,
     mcp_config: IndexMap<String, MCPServerConfig>,
+    workspace_path: Option<String>,
 ) -> Result<(), String> {
-    let workspace_path = state
-        .inner
-        .lock()
-        .map_err(|e| e.to_string())?
-        .workspace_path
-        .clone()
-        .ok_or("No workspace path set. Please select a workspace first.")?;
+    let workspace_path = crate::commands::team::resolve_workspace_path(workspace_path, &state)?;
 
     let mut config = read_config(&workspace_path)?;
     config.mcp = if mcp_config.is_empty() {
@@ -127,14 +118,9 @@ pub async fn add_mcp_server(
     state: State<'_, OpenCodeState>,
     name: String,
     server_config: MCPServerConfig,
+    workspace_path: Option<String>,
 ) -> Result<(), String> {
-    let workspace_path = state
-        .inner
-        .lock()
-        .map_err(|e| e.to_string())?
-        .workspace_path
-        .clone()
-        .ok_or("No workspace path set. Please select a workspace first.")?;
+    let workspace_path = crate::commands::team::resolve_workspace_path(workspace_path, &state)?;
 
     let mut config = read_config(&workspace_path)?;
     let mut mcp = config.mcp.unwrap_or_default();
@@ -154,14 +140,9 @@ pub async fn update_mcp_server(
     state: State<'_, OpenCodeState>,
     name: String,
     server_config: MCPServerConfig,
+    workspace_path: Option<String>,
 ) -> Result<(), String> {
-    let workspace_path = state
-        .inner
-        .lock()
-        .map_err(|e| e.to_string())?
-        .workspace_path
-        .clone()
-        .ok_or("No workspace path set. Please select a workspace first.")?;
+    let workspace_path = crate::commands::team::resolve_workspace_path(workspace_path, &state)?;
 
     let mut config = read_config(&workspace_path)?;
     let mut mcp = config.mcp.unwrap_or_default();
@@ -180,14 +161,9 @@ pub async fn update_mcp_server(
 pub async fn remove_mcp_server(
     state: State<'_, OpenCodeState>,
     name: String,
+    workspace_path: Option<String>,
 ) -> Result<(), String> {
-    let workspace_path = state
-        .inner
-        .lock()
-        .map_err(|e| e.to_string())?
-        .workspace_path
-        .clone()
-        .ok_or("No workspace path set. Please select a workspace first.")?;
+    let workspace_path = crate::commands::team::resolve_workspace_path(workspace_path, &state)?;
 
     let mut config = read_config(&workspace_path)?;
     let mut mcp = config.mcp.unwrap_or_default();
@@ -207,14 +183,9 @@ pub async fn toggle_mcp_server(
     state: State<'_, OpenCodeState>,
     name: String,
     enabled: bool,
+    workspace_path: Option<String>,
 ) -> Result<(), String> {
-    let workspace_path = state
-        .inner
-        .lock()
-        .map_err(|e| e.to_string())?
-        .workspace_path
-        .clone()
-        .ok_or("No workspace path set. Please select a workspace first.")?;
+    let workspace_path = crate::commands::team::resolve_workspace_path(workspace_path, &state)?;
 
     let mut config = read_config(&workspace_path)?;
     let mut mcp = config.mcp.unwrap_or_default();
@@ -241,14 +212,9 @@ pub struct MCPTestResult {
 pub async fn test_mcp_server(
     state: State<'_, OpenCodeState>,
     name: String,
+    workspace_path: Option<String>,
 ) -> Result<MCPTestResult, String> {
-    let workspace_path = state
-        .inner
-        .lock()
-        .map_err(|e| e.to_string())?
-        .workspace_path
-        .clone()
-        .ok_or("No workspace path set. Please select a workspace first.")?;
+    let workspace_path = crate::commands::team::resolve_workspace_path(workspace_path, &state)?;
 
     let config = read_config(&workspace_path)?;
     let mcp = config.mcp.unwrap_or_default();
@@ -291,6 +257,7 @@ async fn test_local_server(
 
     // Try to spawn the process
     let mut cmd = TokioCommand::new(program);
+    cmd.no_window();
     cmd.args(args);
     cmd.current_dir(workspace_path);
     cmd.stdin(Stdio::null());
@@ -547,6 +514,7 @@ async fn query_local_server_tools(
     let args = &command[1..];
 
     let mut cmd = TokioCommand::new(program);
+    cmd.no_window();
     cmd.args(args)
         .current_dir(workspace_path)
         .stdin(std::process::Stdio::piped())
@@ -726,13 +694,7 @@ async fn read_jsonrpc_response(
 pub async fn list_mcp_tools(
     state: State<'_, OpenCodeState>,
 ) -> Result<HashMap<String, Vec<String>>, String> {
-    let workspace_path = state
-        .inner
-        .lock()
-        .map_err(|e| e.to_string())?
-        .workspace_path
-        .clone()
-        .ok_or("No workspace path set")?;
+    let workspace_path = super::opencode::current_workspace_path(&state)?;
 
     let config = read_config(&workspace_path)?;
     let servers = config.mcp.unwrap_or_default();

@@ -15,7 +15,9 @@ import {
   MessageSquareText,
   Plus,
   X,
-  Wrench,
+  SlidersHorizontal,
+  Keyboard,
+  Loader2,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
@@ -31,13 +33,42 @@ import { SettingCard, SectionHeader, ToggleSwitch } from './shared'
 import { getPermissionPolicy, setPermissionPolicy, type PermissionPolicy } from '@/lib/permission-policy'
 import { PermissionBatchSection } from './PermissionBatchSection'
 import { useSuggestionsStore } from '@/stores/suggestions'
-import { appShortName, buildConfig } from '@/lib/build-config'
 import { useUIStore } from '@/stores/ui'
 import { useWorkspaceStore } from '@/stores/workspace'
+import { appShortName, buildConfig } from '@/lib/build-config'
+import { LANGUAGE_OPTIONS, getPreferredLanguage, normalizeSupportedLanguage, persistLanguage } from '@/lib/locale'
 
 // Theme helpers
 const THEME_STORAGE_KEY = `${buildConfig.app.shortName ?? 'teamclaw'}-theme`
 const DEFAULT_THEME = buildConfig.defaults?.theme || 'system'
+const DEFAULT_SPOTLIGHT_SHORTCUT = 'alt+space'
+const MODIFIER_KEYS = new Set(['Alt', 'Control', 'Meta', 'Shift'])
+
+function normalizeShortcutKey(event: KeyboardEvent): string | null {
+  if (MODIFIER_KEYS.has(event.key)) return null
+
+  if (event.code === 'Space') return 'space'
+  if (/^Key[A-Z]$/.test(event.code)) return event.code.slice(3).toLowerCase()
+  if (/^Digit[0-9]$/.test(event.code)) return event.code.slice(5)
+  if (/^Arrow(Up|Down|Left|Right)$/.test(event.code)) return event.code.toLowerCase()
+  if (/^F\d{1,2}$/.test(event.code)) return event.code.toLowerCase()
+
+  if (event.key.length === 1) return event.key.toLowerCase()
+  return event.key.toLowerCase()
+}
+
+function shortcutFromKeyboardEvent(event: KeyboardEvent): string | null {
+  const key = normalizeShortcutKey(event)
+  if (!key) return null
+
+  const parts: string[] = []
+  if (event.metaKey) parts.push('cmd')
+  if (event.ctrlKey) parts.push('ctrl')
+  if (event.altKey) parts.push('alt')
+  if (event.shiftKey) parts.push('shift')
+  parts.push(key)
+  return parts.join('+')
+}
 
 function applyTheme(theme: string) {
   const root = document.documentElement
@@ -71,9 +102,7 @@ export const GeneralSection = React.memo(function GeneralSection() {
   const { t } = useTranslation()
   const [theme, setThemeState] = React.useState(getStoredTheme)
   const [language, setLanguage] = React.useState(() => {
-    const storedLang = localStorage.getItem(`${appShortName}-language`);
-    if (storedLang === 'zh') return 'zh-CN';
-    return storedLang || (navigator.language.startsWith('zh') ? 'zh-CN' : 'en');
+    return getPreferredLanguage()
   })
 
   // Sync language state with i18n instance
@@ -87,9 +116,6 @@ export const GeneralSection = React.memo(function GeneralSection() {
       i18next.off('languageChanged', handleLanguageChange);
     };
   }, []);
-  const advancedMode = useUIStore((s) => s.advancedMode)
-  const setAdvancedMode = useUIStore((s) => s.setAdvancedMode)
-  const workspacePath = useWorkspaceStore((s) => s.workspacePath)
   const [autoSave, setAutoSave] = React.useState(true)
   const [notificationLevel, setNotificationLevelState] = React.useState(() => {
     try {
@@ -108,6 +134,12 @@ export const GeneralSection = React.memo(function GeneralSection() {
     setPermissionPolicyState(policy)
     setPermissionPolicy(policy)
   }, [])
+  const [spotlightShortcut, setSpotlightShortcut] = React.useState(DEFAULT_SPOTLIGHT_SHORTCUT)
+  const [savedSpotlightShortcut, setSavedSpotlightShortcut] = React.useState(DEFAULT_SPOTLIGHT_SHORTCUT)
+  const [spotlightShortcutLoading, setSpotlightShortcutLoading] = React.useState(true)
+  const [spotlightShortcutSaving, setSpotlightShortcutSaving] = React.useState(false)
+  const [spotlightShortcutCapturing, setSpotlightShortcutCapturing] = React.useState(false)
+  const [spotlightShortcutError, setSpotlightShortcutError] = React.useState<string | null>(null)
 
   // Listen to system preference changes when theme is 'system'
   React.useEffect(() => {
@@ -124,12 +156,89 @@ export const GeneralSection = React.memo(function GeneralSection() {
     applyTheme(t)
   }, [])
 
+  React.useEffect(() => {
+    let cancelled = false
+
+    void invoke<string>('get_spotlight_shortcut')
+      .then((shortcut) => {
+        if (cancelled) return
+        const value = shortcut || DEFAULT_SPOTLIGHT_SHORTCUT
+        setSpotlightShortcut(value)
+        setSavedSpotlightShortcut(value)
+        setSpotlightShortcutError(null)
+      })
+      .catch((error) => {
+        if (cancelled) return
+        console.error('Failed to load spotlight shortcut', error)
+        setSpotlightShortcut(DEFAULT_SPOTLIGHT_SHORTCUT)
+        setSavedSpotlightShortcut(DEFAULT_SPOTLIGHT_SHORTCUT)
+        setSpotlightShortcutError(t('settings.general.spotlightShortcutLoadError', 'Failed to load shortcut setting'))
+      })
+      .finally(() => {
+        if (!cancelled) setSpotlightShortcutLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [t])
+
+  const saveSpotlightShortcut = React.useCallback((nextShortcut: string) => {
+    const shortcut = nextShortcut.trim()
+    if (!shortcut || spotlightShortcutSaving) return
+
+    const previous = savedSpotlightShortcut
+    setSpotlightShortcut(shortcut)
+    setSpotlightShortcutSaving(true)
+    setSpotlightShortcutError(null)
+    void invoke<string>('set_spotlight_shortcut', { shortcut })
+      .then((saved) => {
+        const value = saved || shortcut
+        setSpotlightShortcut(value)
+        setSavedSpotlightShortcut(value)
+      })
+      .catch((error) => {
+        console.error('Failed to save spotlight shortcut', error)
+        setSpotlightShortcut(previous)
+        setSpotlightShortcutError(
+          error instanceof Error
+            ? error.message
+            : String(error || t('settings.general.spotlightShortcutSaveError', 'Failed to save shortcut'))
+        )
+      })
+      .finally(() => setSpotlightShortcutSaving(false))
+  }, [savedSpotlightShortcut, spotlightShortcutSaving, t])
+
+  React.useEffect(() => {
+    if (!spotlightShortcutCapturing) return
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      event.preventDefault()
+      event.stopPropagation()
+
+      if (event.key === 'Escape') {
+        setSpotlightShortcutCapturing(false)
+        return
+      }
+
+      const shortcut = shortcutFromKeyboardEvent(event)
+      if (!shortcut) return
+
+      setSpotlightShortcutCapturing(false)
+      saveSpotlightShortcut(shortcut)
+    }
+
+    window.addEventListener('keydown', handleKeyDown, true)
+    return () => window.removeEventListener('keydown', handleKeyDown, true)
+  }, [saveSpotlightShortcut, spotlightShortcutCapturing])
+
   const themeIcons: Record<string, React.ElementType> = {
     light: Sun,
     dark: Moon,
     system: Monitor,
   }
 
+  const spotlightShortcutDisabled = spotlightShortcutLoading || spotlightShortcutSaving
 
   return (
     <div className="space-y-6">
@@ -179,25 +288,69 @@ export const GeneralSection = React.memo(function GeneralSection() {
   <Select
     value={language}
     onValueChange={(value) => {
-      setLanguage(value);
-      i18next.changeLanguage(value);
-      localStorage.setItem(`${appShortName}-language`, value);
+      const normalizedValue = normalizeSupportedLanguage(value);
+      setLanguage(normalizedValue);
+      i18next.changeLanguage(normalizedValue);
+      persistLanguage(normalizedValue);
       // Sync locale to config file for gateway i18n
-      invoke('set_config_locale', { locale: value }).catch(console.error);
+      invoke('set_config_locale', { locale: normalizedValue }).catch(console.error);
     }}
   >
     <SelectTrigger className="h-11">
       <SelectValue />
     </SelectTrigger>
     <SelectContent>
-      <SelectItem value="en">🇺🇸 {t('common.english', 'English')}</SelectItem>
-      <SelectItem value="zh-CN">🇨🇳 {t('common.chinese', '中文')}</SelectItem>
-      <SelectItem value="ja">🇯🇵 {t('common.japanese', '日本語')}</SelectItem>
+      {LANGUAGE_OPTIONS.map((option) => (
+        <SelectItem key={option.value} value={option.value}>
+          {option.value === 'en' ? '🇺🇸 ' : '🇨🇳 '}
+          {t(option.labelKey, option.fallback)}
+        </SelectItem>
+      ))}
     </SelectContent>
   </Select>
 </div>
       </SettingCard>
       ) : null}
+
+      <SettingCard>
+        <div className="space-y-3">
+          <div className="space-y-1">
+            <label className="text-sm font-medium flex items-center gap-2">
+              <Keyboard className="h-4 w-4 text-muted-foreground" />
+              {t('settings.general.spotlightShortcut', 'Spotlight Shortcut')}
+            </label>
+            <p className="text-xs text-muted-foreground">
+              {t('settings.general.spotlightShortcutDesc', 'Shortcut used to toggle the small window mode')}
+            </p>
+          </div>
+          <Button
+            variant="outline"
+            type="button"
+            className="h-10 w-full justify-between gap-3 font-mono text-sm"
+            onClick={() => {
+              setSpotlightShortcutCapturing(true)
+              setSpotlightShortcutError(null)
+            }}
+            disabled={spotlightShortcutDisabled}
+          >
+            <span>
+              {spotlightShortcutCapturing
+                ? t('settings.general.spotlightShortcutRecording', 'Press shortcut...')
+                : spotlightShortcut}
+            </span>
+            {spotlightShortcutSaving ? (
+              <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+            ) : (
+              <Keyboard className="h-4 w-4 text-muted-foreground" />
+            )}
+          </Button>
+          {spotlightShortcutError && (
+            <p className="text-xs text-destructive" role="alert">
+              {spotlightShortcutError}
+            </p>
+          )}
+        </div>
+      </SettingCard>
 
       <SettingCard>
         <div className="space-y-4">
@@ -274,21 +427,54 @@ export const GeneralSection = React.memo(function GeneralSection() {
 
       <ChatSuggestionsCard />
 
-      {buildConfig.features.advancedMode && (
-        <div className="flex items-center justify-between px-1 py-1">
-          <label className="text-xs text-muted-foreground flex items-center gap-1.5">
-            <Wrench className="h-3 w-3" />
-            {t('settings.general.advancedMode', 'Advanced Mode')}
-          </label>
-          <ToggleSwitch
-            enabled={advancedMode}
-            onChange={(v) => setAdvancedMode(v, workspacePath)}
-          />
-        </div>
-      )}
+      <AdvancedModeCard />
     </div>
   )
 })
+
+function AdvancedModeCard() {
+  const { t } = useTranslation()
+  const advancedMode = useUIStore(s => s.advancedMode)
+  const setAdvancedMode = useUIStore(s => s.setAdvancedMode)
+  const workspacePath = useWorkspaceStore(s => s.workspacePath)
+  const refreshFileTree = useWorkspaceStore(s => s.refreshFileTree)
+  const [saving, setSaving] = React.useState(false)
+
+  const handleAdvancedModeChange = React.useCallback((enabled: boolean) => {
+    if (!workspacePath || saving) return
+
+    setSaving(true)
+    void (async () => {
+      try {
+        await setAdvancedMode(enabled, workspacePath)
+        await refreshFileTree()
+      } finally {
+        setSaving(false)
+      }
+    })()
+  }, [refreshFileTree, saving, setAdvancedMode, workspacePath])
+
+  return (
+    <SettingCard>
+      <div className="flex items-center justify-between gap-4">
+        <div className="space-y-1">
+          <label className="text-sm font-medium flex items-center gap-2">
+            <SlidersHorizontal className="h-4 w-4 text-muted-foreground" />
+            {t('settings.general.advancedMode', 'Advanced Mode')}
+          </label>
+          <p className="text-xs text-muted-foreground">
+            {t('settings.general.advancedModeDesc', 'Show system and team internal files in the file tree and enable Code mode')}
+          </p>
+        </div>
+        <ToggleSwitch
+          enabled={advancedMode}
+          onChange={handleAdvancedModeChange}
+          disabled={!workspacePath || saving}
+        />
+      </div>
+    </SettingCard>
+  )
+}
 
 function ChatSuggestionsCard() {
   const { t } = useTranslation()

@@ -3,13 +3,12 @@ use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::pin::Pin;
 
+pub type RerankScores = Vec<(usize, f64)>;
+pub type RerankFuture<'a> = Pin<Box<dyn Future<Output = Result<RerankScores>> + Send + 'a>>;
+
 /// Trait for reranking providers
 pub trait Reranker: Send + Sync {
-    fn rerank<'a>(
-        &'a self,
-        query: &'a str,
-        documents: Vec<&'a str>,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<(usize, f64)>>> + Send + 'a>>;
+    fn rerank<'a>(&'a self, query: &'a str, documents: Vec<&'a str>) -> RerankFuture<'a>;
 }
 
 // ---------------------------------------------------------------------------
@@ -131,7 +130,7 @@ impl Reranker for JinaReranker {
 }
 
 // ---------------------------------------------------------------------------
-// Compass Reranker  (https://compass.llm.shopee.io/compass-api/v1/rerank)
+// Compass Reranker
 // Response `results` is a positional array of scores matching the input order.
 // ---------------------------------------------------------------------------
 
@@ -172,10 +171,9 @@ impl CompassReranker {
             .as_deref()
             .filter(|k| !k.is_empty())
             .with_context(|| {
-                format!(
-            "RAG_RERANK_API_KEY is required when RAG_RERANK_ENABLED=true (provider=compass). \
+                "RAG_RERANK_API_KEY is required when RAG_RERANK_ENABLED=true (provider=compass). \
                  Set it in .teamclaw/rag-config.json or opencode.json mcp.rag.environment."
-        )
+                    .to_string()
             })
     }
 
@@ -221,7 +219,6 @@ impl CompassReranker {
             .results
             .into_iter()
             .enumerate()
-            .map(|(idx, score)| (idx, score))
             .collect())
     }
 }
@@ -303,10 +300,9 @@ impl LangSearchReranker {
             .as_deref()
             .filter(|k| !k.is_empty())
             .with_context(|| {
-                format!(
-            "RAG_RERANK_API_KEY is required when RAG_RERANK_ENABLED=true (provider=langsearch). \
+                "RAG_RERANK_API_KEY is required when RAG_RERANK_ENABLED=true (provider=langsearch). \
                  Set it in .teamclaw/rag-config.json or opencode.json mcp.rag.environment."
-        )
+                    .to_string()
             })
     }
 
@@ -388,8 +384,7 @@ pub fn create_reranker(
     match provider.to_lowercase().as_str() {
         "jina" => Ok(Box::new(JinaReranker::new(api_key, model))),
         "compass" => {
-            let url = base_url
-                .unwrap_or_else(|| "https://compass.llm.shopee.io/compass-api/v1".to_string());
+            let url = base_url.unwrap_or_default();
             Ok(Box::new(CompassReranker::new(api_key, url)))
         }
         "langsearch" => Ok(Box::new(LangSearchReranker::new(api_key, model, base_url))),
@@ -419,12 +414,9 @@ mod tests {
     fn test_compass_reranker_creation() {
         let reranker = CompassReranker::new(
             Some("test-key".to_string()),
-            "https://compass.llm.shopee.io/compass-api/v1".to_string(),
+            "https://example.com/api/v1".to_string(),
         );
-        assert_eq!(
-            reranker.base_url,
-            "https://compass.llm.shopee.io/compass-api/v1"
-        );
+        assert_eq!(reranker.base_url, "https://example.com/api/v1");
     }
 
     #[test]
@@ -459,7 +451,7 @@ mod tests {
     async fn test_compass_reranker_empty_documents() {
         let reranker = CompassReranker::new(
             Some("test-key".to_string()),
-            "https://compass.llm.shopee.io/compass-api/v1".to_string(),
+            "https://example.com/api/v1".to_string(),
         );
         let results = reranker.rerank("test query", Vec::new()).await.unwrap();
         assert!(results.is_empty());
@@ -478,7 +470,7 @@ mod tests {
             "compass",
             Some("key".to_string()),
             String::new(),
-            Some("https://compass.llm.shopee.io/compass-api/v1".to_string()),
+            Some("https://example.com/api/v1".to_string()),
         );
         assert!(reranker.is_ok());
     }

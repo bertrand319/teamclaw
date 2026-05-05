@@ -6,7 +6,6 @@ import {
   Loader2,
   Circle,
   Pencil,
-  Check,
   Terminal,
   FilePlus,
   FolderPlus,
@@ -23,10 +22,12 @@ import {
 
 import { cn } from '@/lib/utils';
 import { TEAM_REPO_DIR } from '@/lib/build-config';
+import { ObsidianIcon } from '@/components/knowledge/ObsidianIcon';
 import { useTeamModeStore } from '@/stores/team-mode';
 import { useTabsStore } from '@/stores/tabs';
 import { getFileIcon } from '@/lib/file-icons';
 import { getGitStatusIndicator, getGitStatusTextColor } from '@/lib/git-status-utils';
+import { formatDateTime, formatRelativeTime } from '@/lib/date-format';
 import { GitStatus } from "@/lib/git/service";
 import type { FileNode } from "@/stores/workspace";
 import {
@@ -40,9 +41,9 @@ import {
 
 function getSyncStatusTextColor(status: 'synced' | 'modified' | 'new'): string {
   switch (status) {
-    case 'synced': return 'text-green-600'
-    case 'modified': return 'text-orange-500'
-    case 'new': return 'text-gray-400'
+    case 'synced': return ''
+    case 'modified': return 'text-yellow-500'
+    case 'new': return 'text-green-500'
   }
 }
 
@@ -161,6 +162,10 @@ export interface FileTreeItemProps {
   isDragOver: boolean;
   /** Whether this is the root teamclaw-team directory (for visual styling) */
   isTeamClawTeam?: boolean;
+  /** Whether the team directory is currently syncing (Git mode) */
+  teamSyncing?: boolean;
+  /** ISO timestamp of last successful team repo sync (for relative-time label) */
+  teamLastSyncAt?: string | null;
   /** OSS sync status for team files */
   syncStatus?: 'synced' | 'modified' | 'new' | null;
   compactName?: string;
@@ -211,6 +216,8 @@ export const FileTreeItem = React.memo(function FileTreeItem({
   isRenaming,
   isDragOver,
   isTeamClawTeam,
+  teamSyncing,
+  teamLastSyncAt,
   syncStatus,
   onSelectFile,
   onSelectFileRange,
@@ -252,8 +259,14 @@ export const FileTreeItem = React.memo(function FileTreeItem({
   const isViewerRestricted = isTeamFile && myRole === 'viewer'
   const isCutTarget = clipboardPaths?.includes(node.path) && isClipboardCut;
   const displayName = compactName || node.name;
+  const contextMenuOpenedAtRef = useRef(0);
 
   const handleClick = (e: React.MouseEvent) => {
+    // Ignore click events that are part of opening the context menu
+    // (e.g. ctrl+click on macOS, or synthetic click after right-click gesture).
+    if (Date.now() - contextMenuOpenedAtRef.current < 220) {
+      return;
+    }
     if (isDirectory) {
       if (isExpanded) {
         if (compactedPaths && compactedPaths.length > 1) {
@@ -275,9 +288,21 @@ export const FileTreeItem = React.memo(function FileTreeItem({
     }
   };
 
+  const guardedMenuAction = useCallback((action: () => void) => {
+    return (event: Event) => {
+      // Prevent accidental immediate selection caused by the opening pointer gesture.
+      if (Date.now() - contextMenuOpenedAtRef.current < 140) {
+        event.preventDefault();
+        return;
+      }
+      action();
+    };
+  }, []);
+
   const fileIconInfo = !isDirectory ? getFileIcon(node.name) : null;
   const FileIcon = fileIconInfo?.icon || File;
   const fileIconColor = fileIconInfo?.color || "text-muted-foreground";
+  const isKnowledgeDir = isDirectory && node.name === 'knowledge' && !node.path.includes('/.trash/');
 
   if (isRenaming) {
     return (
@@ -306,8 +331,8 @@ export const FileTreeItem = React.memo(function FileTreeItem({
       onDragOver={(e) => isDirectory ? onDragOver(e, node.path) : undefined}
       onDragLeave={(e) => isDirectory ? onDragLeave(e) : undefined}
       onDrop={(e) => isDirectory ? onDrop(e, node.path) : undefined}
-      onContextMenu={(e) => {
-        e.currentTarget.focus();
+      onContextMenu={() => {
+        contextMenuOpenedAtRef.current = Date.now();
         window.getSelection()?.removeAllRanges();
       }}
       data-path={node.path}
@@ -315,13 +340,12 @@ export const FileTreeItem = React.memo(function FileTreeItem({
       className={cn(
         "flex items-center gap-1 py-1 px-2 text-left text-sm hover:bg-primary/10 data-[state=open]:bg-primary/10 rounded transition-colors whitespace-nowrap w-full select-none",
         isSelected &&
-          "bg-primary/20 text-primary font-medium ring-1 ring-primary/30",
+          "bg-primary/20 text-primary font-medium ring-1 ring-inset ring-primary/30",
         isFocused && !isSelected &&
-          "ring-1 ring-primary/50 bg-primary/5",
+          "ring-1 ring-inset ring-primary/40 bg-primary/5",
         isDragOver && isDirectory &&
-          "bg-primary/20 ring-2 ring-primary/40",
+          "bg-primary/20 ring-2 ring-inset ring-primary/40",
         hasGitChanges && !isSelected && !isFocused && "git-status-changed",
-        isTeamClawTeam && !isSelected && !isFocused && "border-l border-blue-500/40",
         isCutTarget && "opacity-50",
       )}
       style={{ paddingLeft: `${level * 12 + 8}px` }}
@@ -352,8 +376,14 @@ export const FileTreeItem = React.memo(function FileTreeItem({
         />
       )}
 
-      {isSelected && !isDirectory && (
-        <Check className="h-3.5 w-3.5 shrink-0 text-primary" />
+      {isTeamClawTeam && (
+        teamSyncing
+          ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground" />
+          : <img src="/logo-64.png" alt="" className="h-3.5 w-3.5 shrink-0" />
+      )}
+
+      {isKnowledgeDir && !isTeamClawTeam && (
+        <ObsidianIcon className="h-3.5 w-3.5 shrink-0" style={{ color: '#7C3AED' }} />
       )}
 
       <span
@@ -390,6 +420,19 @@ export const FileTreeItem = React.memo(function FileTreeItem({
       {hasGitChanges && isDirectory && (
         <Circle className="h-1.5 w-1.5 fill-amber-500 text-amber-500 shrink-0" />
       )}
+      {isTeamClawTeam && !teamSyncing && teamLastSyncAt && (
+        <span
+          className="ml-auto pl-2 text-[10px] text-muted-foreground/70 font-normal shrink-0"
+          title={t('fileExplorer.teamLastSyncTooltip', 'Last sync: {{time}}', { time: formatDateTime(teamLastSyncAt) })}
+        >
+          {formatRelativeTime(teamLastSyncAt)}
+        </span>
+      )}
+      {isTeamClawTeam && teamSyncing && (
+        <span className="ml-auto pl-2 text-[10px] text-muted-foreground/70 font-normal shrink-0">
+          {t('fileExplorer.teamSyncing', 'Syncing…')}
+        </span>
+      )}
     </button>
   );
 
@@ -404,61 +447,61 @@ export const FileTreeItem = React.memo(function FileTreeItem({
       <ContextMenuContent className="w-56">
         {isDirectory && !isViewerRestricted && (
           <>
-            <ContextMenuItem onClick={() => onNewFile(node.path)}>
+            <ContextMenuItem onSelect={guardedMenuAction(() => onNewFile(node.path))}>
               <FilePlus className="h-4 w-4" />
               {t("fileExplorer.newFile", "New File")}
               <ContextMenuShortcut>⌘N</ContextMenuShortcut>
             </ContextMenuItem>
-            <ContextMenuItem onClick={() => onNewFolder(node.path)}>
+            <ContextMenuItem onSelect={guardedMenuAction(() => onNewFolder(node.path))}>
               <FolderPlus className="h-4 w-4" />
               {t("fileExplorer.newFolder", "New Folder")}
             </ContextMenuItem>
             <ContextMenuSeparator />
           </>
         )}
-        <ContextMenuItem onClick={() => onAddToAgent(node.path)}>
+        <ContextMenuItem onSelect={guardedMenuAction(() => onAddToAgent(node.path))}>
           <MessageSquarePlus className="h-4 w-4" />
           {t("fileExplorer.addToAgent", "Add to Agent")}
         </ContextMenuItem>
         {!isDirectory && (
-          <ContextMenuItem onClick={() => onOpenDefault(node.path)}>
+          <ContextMenuItem onSelect={guardedMenuAction(() => onOpenDefault(node.path))}>
             <AppWindow className="h-4 w-4" />
             {t("fileExplorer.openWithDefault", "Open with Default App")}
           </ContextMenuItem>
         )}
         <ContextMenuSeparator />
-        <ContextMenuItem onClick={() => onCopyPath(node.path)}>
+        <ContextMenuItem onSelect={guardedMenuAction(() => onCopyPath(node.path))}>
           <Copy className="h-4 w-4" />
           {t("fileExplorer.copyPath", "Copy Path")}
         </ContextMenuItem>
-        <ContextMenuItem onClick={() => onCopyRelativePath(node.path)}>
+        <ContextMenuItem onSelect={guardedMenuAction(() => onCopyRelativePath(node.path))}>
           <Copy className="h-4 w-4" />
           {t("fileExplorer.copyRelativePath", "Copy Relative Path")}
         </ContextMenuItem>
         <ContextMenuSeparator />
-        <ContextMenuItem onClick={() => onCopy([node.path])}>
+        <ContextMenuItem onSelect={guardedMenuAction(() => onCopy([node.path]))}>
           <Copy className="h-4 w-4" />
           {t("fileExplorer.copyFile", "Copy")}
           <ContextMenuShortcut>⌘C</ContextMenuShortcut>
         </ContextMenuItem>
         {!isViewerRestricted && (
-          <ContextMenuItem onClick={() => onCut([node.path])}>
+          <ContextMenuItem onSelect={guardedMenuAction(() => onCut([node.path]))}>
             <Scissors className="h-4 w-4" />
             {t("fileExplorer.cutFile", "Cut")}
             <ContextMenuShortcut>⌘X</ContextMenuShortcut>
           </ContextMenuItem>
         )}
         {!isViewerRestricted && hasClipboard && (
-          <ContextMenuItem onClick={() => onPaste(
+          <ContextMenuItem onSelect={guardedMenuAction(() => onPaste(
             isDirectory ? node.path : node.path.substring(0, node.path.lastIndexOf("/"))
-          )}>
+          ))}>
             <ClipboardPaste className="h-4 w-4" />
             {t("fileExplorer.pasteFile", "Paste")}
             <ContextMenuShortcut>⌘V</ContextMenuShortcut>
           </ContextMenuItem>
         )}
         {!isViewerRestricted && (
-          <ContextMenuItem onClick={() => onDuplicate(node.path)}>
+          <ContextMenuItem onSelect={guardedMenuAction(() => onDuplicate(node.path))}>
             <CopyPlus className="h-4 w-4" />
             {t("fileExplorer.duplicate", "Duplicate")}
             <ContextMenuShortcut>⌘D</ContextMenuShortcut>
@@ -466,21 +509,21 @@ export const FileTreeItem = React.memo(function FileTreeItem({
         )}
         {!isDirectory && (
           <ContextMenuItem
-            onClick={() => {
+            onSelect={guardedMenuAction(() => {
               useTabsStore.getState().openTab({
                 type: "native",
                 target: "version-history",
-                label: "版本历史",
+                label: t("versionHistory.title", "Version history"),
               })
-            }}
+            })}
           >
             <History className="h-4 w-4" />
-            版本历史
+            {t("versionHistory.title", "Version history")}
           </ContextMenuItem>
         )}
         <ContextMenuSeparator />
         {!isViewerRestricted && (
-          <ContextMenuItem onClick={() => onRename(node.path)}>
+          <ContextMenuItem onSelect={guardedMenuAction(() => onRename(node.path))}>
             <Pencil className="h-4 w-4" />
             {t("fileExplorer.rename", "Rename")}
             <ContextMenuShortcut>F2</ContextMenuShortcut>
@@ -489,7 +532,7 @@ export const FileTreeItem = React.memo(function FileTreeItem({
         {!isViewerRestricted && (
           <ContextMenuItem
             variant="destructive"
-            onClick={() => onDelete(node.path, isDirectory)}
+            onSelect={guardedMenuAction(() => onDelete(node.path, isDirectory))}
           >
             <Trash2 className="h-4 w-4" />
             {t("fileExplorer.delete", "Delete")}
@@ -497,11 +540,11 @@ export const FileTreeItem = React.memo(function FileTreeItem({
           </ContextMenuItem>
         )}
         <ContextMenuSeparator />
-        <ContextMenuItem onClick={() => onOpenTerminal(terminalPath)}>
+        <ContextMenuItem onSelect={guardedMenuAction(() => onOpenTerminal(terminalPath))}>
           <Terminal className="h-4 w-4" />
           {t("fileExplorer.openInTerminal", "Open in Terminal")}
         </ContextMenuItem>
-        <ContextMenuItem onClick={() => onReveal(node.path)}>
+        <ContextMenuItem onSelect={guardedMenuAction(() => onReveal(node.path))}>
           <ExternalLink className="h-4 w-4" />
           {t("fileExplorer.revealInFinder", "Reveal in Finder")}
         </ContextMenuItem>

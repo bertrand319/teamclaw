@@ -3,6 +3,7 @@
 
 const { spawn } = require("child_process");
 const { createRustBuildEnv } = require("./rust-build-env");
+const { ensureTeamclawIntrospectSidecar } = require("./ensure-introspect-sidecar");
 
 const args = process.argv.slice(2);
 const env = createRustBuildEnv(process.env, __dirname);
@@ -19,6 +20,10 @@ if (args[0] === "check" && !env.CI) {
     });
   }
 }
+
+// Unlike opencode (downloaded externally), introspect is a local crate.
+// Build before invoking cargo to avoid build.rs deadlock. Skipped when env.CI is set (e.g. rust:check).
+ensureTeamclawIntrospectSidecar(env);
 
 const child = spawn("cargo", args, {
   stdio: "inherit",

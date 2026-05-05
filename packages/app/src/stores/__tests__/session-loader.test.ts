@@ -8,6 +8,7 @@ const mockGetMessages = vi.fn()
 const mockGetSession = vi.fn()
 const mockGetTodos = vi.fn()
 const mockGetSessionDiff = vi.fn()
+const mockClearStreaming = vi.fn()
 
 vi.mock('@/lib/opencode/sdk-client', () => ({
   getOpenCodeClient: () => ({
@@ -28,7 +29,7 @@ vi.mock('@/stores/streaming', () => ({
       getState: () => ({
         streamingMessageId: null,
         streamingContent: '',
-        clearStreaming: vi.fn(),
+        clearStreaming: mockClearStreaming,
         setStreaming: vi.fn(),
       }),
     },
@@ -74,6 +75,8 @@ describe('session-loader: createLoaderActions', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    mockClearStreaming.mockClear()
+    vi.mocked(localStorage.getItem).mockReturnValue(null)
     sessionLookupCache.clear()
     sessionDataCache.clear()
     selfCreatedSessionIds.clear()
@@ -84,6 +87,10 @@ describe('session-loader: createLoaderActions', () => {
       activeSessionId: null,
       isLoading: false,
       messageQueue: [],
+      pendingPermissions: [],
+      pendingQuestions: [],
+      pendingQuestionIdsBySession: {},
+      sessionStatuses: {},
       todos: [],
       sessionDiff: [],
       error: null,
@@ -128,8 +135,9 @@ describe('session-loader: createLoaderActions', () => {
     expect(sessions[1].id).toBe('older')
   })
 
-  it('loadSessions removes pinned ids that no longer exist', async () => {
+  it('loadSessions preserves pinned ids that are temporarily missing', async () => {
     const now = Date.now()
+    state.currentWorkspacePath = '/workspace'
     state.pinnedSessionIds = ['missing', 'active']
     mockListSessions.mockResolvedValue([
       { id: 'active', title: 'Active', time: { created: now, updated: now } },
@@ -137,16 +145,29 @@ describe('session-loader: createLoaderActions', () => {
 
     await actions.loadSessions('/workspace')
 
-    const sessionsCall = set.mock.calls.find(
-      (c) => {
-        const arg = c[0]
-        return typeof arg === 'object' && arg !== null && 'pinnedSessionIds' in arg
-      }
+    expect(state.pinnedSessionIds).toEqual(['missing', 'active'])
+    expect(localStorage.setItem).not.toHaveBeenCalled()
+  })
+
+  it('loadSessions preserves pinned ids from other workspaces when switching', async () => {
+    const now = Date.now()
+    vi.mocked(localStorage.getItem).mockReturnValue(
+      JSON.stringify({
+        '/workspace-a': ['a-pinned'],
+        '/workspace-b': ['b-pinned'],
+      }),
     )
 
-    expect(sessionsCall).toBeDefined()
-    expect(sessionsCall![0].pinnedSessionIds).toEqual(['active'])
-    expect(localStorage.setItem).toHaveBeenCalled()
+    mockListSessions.mockResolvedValue([
+      { id: 'b-pinned', title: 'Pinned in B', time: { created: now, updated: now } },
+      { id: 'b-other', title: 'Other in B', time: { created: now - 1000, updated: now - 1000 } },
+    ])
+
+    await actions.loadSessions('/workspace-b')
+
+    expect(state.pinnedSessionIds).toEqual(['b-pinned'])
+    expect(state.currentWorkspacePath).toBe('/workspace-b')
+    expect(localStorage.setItem).not.toHaveBeenCalled()
   })
 
   it('loadSessions filters out archived and child sessions', async () => {
@@ -180,6 +201,16 @@ describe('session-loader: createLoaderActions', () => {
       error: 'Network error',
       isLoading: false,
     }))
+  })
+
+  it('resetSessions clears pending activity maps', () => {
+    state.pendingQuestionIdsBySession = { 'sess-1': ['question-1'] }
+    state.sessionStatuses = { 'sess-1': { type: 'busy' } }
+
+    actions.resetSessions()
+
+    expect(state.pendingQuestionIdsBySession).toEqual({})
+    expect(state.sessionStatuses).toEqual({})
   })
 
   it('createSession calls API, adds session to state, tracks self-created', async () => {
@@ -230,6 +261,57 @@ describe('session-loader: createLoaderActions', () => {
     expect(mockGetMessages).toHaveBeenCalledWith('sess-1')
   })
 
+  it('setActiveSession keeps pending permissions so sidebar approval state survives session switches', async () => {
+    const now = Date.now()
+    state.sessions = [
+      {
+        id: 'sess-1',
+        title: 'Waiting',
+        messages: [],
+        createdAt: new Date(now),
+        updatedAt: new Date(now),
+      },
+      {
+        id: 'sess-2',
+        title: 'Target',
+        messages: [],
+        createdAt: new Date(now),
+        updatedAt: new Date(now),
+      },
+    ]
+    state.activeSessionId = 'sess-1'
+    state.pendingPermissions = [
+      {
+        permission: {
+          id: 'perm-1',
+          sessionID: 'sess-1',
+          permission: 'bash',
+          patterns: ['ls'],
+        },
+        childSessionId: null,
+        ownerSessionId: 'sess-1',
+      },
+    ]
+
+    mockGetMessages.mockResolvedValue([])
+    mockGetSession.mockResolvedValue({
+      id: 'sess-2',
+      title: 'Target',
+      time: { created: now, updated: now },
+    })
+    mockGetTodos.mockResolvedValue([])
+    mockGetSessionDiff.mockResolvedValue([])
+
+    await actions.setActiveSession('sess-2')
+
+    expect(state.pendingPermissions).toEqual([
+      expect.objectContaining({
+        permission: expect.objectContaining({ id: 'perm-1' }),
+        ownerSessionId: 'sess-1',
+      }),
+    ])
+  })
+
   it('archiveSession removes the session from pinned ids', async () => {
     const now = Date.now()
     state.sessions = [{
@@ -250,5 +332,58 @@ describe('session-loader: createLoaderActions', () => {
     expect(state.pinnedSessionIds).toEqual([])
     expect(localStorage.setItem).toHaveBeenCalled()
     expect(state.activeSessionId).toBeNull()
+  })
+
+  it('archiveSession clears streaming state when archiving the active session', async () => {
+    const now = Date.now()
+    state.sessions = [
+      {
+        id: 'sess-1',
+        title: 'Question session',
+        messages: [],
+        createdAt: new Date(now),
+        updatedAt: new Date(now),
+        directory: '/workspace',
+      },
+      {
+        id: 'sess-2',
+        title: 'Next session',
+        messages: [],
+        createdAt: new Date(now - 1),
+        updatedAt: new Date(now - 1),
+        directory: '/workspace',
+      },
+    ]
+    state.activeSessionId = 'sess-1'
+    state.sessionStatus = { type: 'busy' }
+    state.pendingQuestionIdsBySession = { 'sess-1': ['question-1'] }
+    mockArchiveSession.mockResolvedValue(undefined)
+
+    await actions.archiveSession('sess-1')
+
+    expect(mockClearStreaming).toHaveBeenCalled()
+    expect(state.activeSessionId).toBe('sess-2')
+    expect(state.sessionStatus).toBeNull()
+    expect(state.pendingQuestionIdsBySession).toEqual({})
+  })
+
+  it('loadAllSessionMessages refuses to fetch when too many sessions need messages', async () => {
+    const now = Date.now()
+    mockListSessions.mockResolvedValue(
+      Array.from({ length: 31 }, (_, index) => ({
+        id: `session-${index}`,
+        title: `Session ${index}`,
+        time: { created: now - index, updated: now - index },
+        directory: '/workspace',
+      })),
+    )
+
+    await actions.loadAllSessionMessages('/workspace')
+
+    expect(mockListSessions).toHaveBeenCalledWith({ directory: '/workspace', roots: true })
+    expect(mockGetMessages).not.toHaveBeenCalled()
+    expect(state.dashboardLoading).toBe(false)
+    expect(state.dashboardLoadProgress).toEqual({ loaded: 0, total: 31 })
+    expect(state.dashboardLoadError).toContain('31 sessions')
   })
 })

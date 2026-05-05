@@ -31,21 +31,28 @@ describe('Auto Update - Configuration', () => {
     expect(config.plugins.updater.pubkey).toBeTruthy();
     expect(config.plugins.updater.endpoints).toBeInstanceOf(Array);
     expect(config.plugins.updater.endpoints.length).toBeGreaterThan(0);
-    expect(config.plugins.updater.endpoints[0]).toContain('github.com');
-    expect(config.plugins.updater.endpoints[0]).toContain('latest.json');
+    expect(config.plugins.updater.endpoints).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/^(?:__OSS_BASE_URL__|https:\/\/teamclaw\.ucar\.cc)\/releases\/latest\.json$/),
+      ]),
+    );
+    expect(config.plugins.updater.endpoints).toContain('https://github.com/different-ai-studio/teamclaw/releases/latest/download/latest.json');
     expect(config.bundle.createUpdaterArtifacts).toBe(true);
   });
 
-  it('build.config.json exports updater configuration to Rust', () => {
-    const buildConfigPath = path.resolve(repoRoot, 'build.config.json');
+  it('build config exports updater configuration to Rust', () => {
+    const buildConfigPath = path.resolve(repoRoot, 'build.config.local.json');
     const tauriConfigPath = path.resolve(repoRoot, 'src-tauri', 'tauri.conf.json');
     const buildConfig = JSON.parse(fs.readFileSync(buildConfigPath, 'utf-8'));
     const tauriConfig = JSON.parse(fs.readFileSync(tauriConfigPath, 'utf-8'));
+    const buildUpdater = buildConfig.app?.updater;
+    const buildEndpoints = Array.isArray(buildUpdater?.endpoints)
+      ? buildUpdater.endpoints
+      : [buildUpdater?.endpoint].filter(Boolean);
 
-    expect(buildConfig.app?.updater?.endpoint).toBe(
-      tauriConfig.plugins.updater.endpoints[0],
-    );
-    expect(buildConfig.app?.updater?.pubkey).toBe(
+    expect(buildEndpoints.length).toBeGreaterThan(0);
+    expect(tauriConfig.plugins.updater.endpoints).toEqual(buildEndpoints);
+    expect(buildUpdater?.pubkey).toBe(
       tauriConfig.plugins.updater.pubkey,
     );
   });
@@ -81,6 +88,10 @@ describe('Auto Update - Configuration', () => {
     expect(workflow).toContain('TAURI_SIGNING_PRIVATE_KEY_PASSWORD');
     expect(workflow).toContain('aarch64-apple-darwin');
     expect(workflow).toContain('pnpm');
+    expect(workflow).toContain("bucket.put_object_from_file(");
+    expect(workflow).toContain("'releases/latest.json'");
+    expect(workflow).toContain("platforms");
+    expect(workflow).toContain("entry['url'] =");
   });
 });
 

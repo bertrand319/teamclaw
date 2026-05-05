@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct WeComConfig {
     #[serde(default)]
@@ -11,17 +11,10 @@ pub struct WeComConfig {
     pub secret: String,
     #[serde(default)]
     pub encoding_aes_key: Option<String>,
-}
-
-impl Default for WeComConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            bot_id: String::new(),
-            secret: String::new(),
-            encoding_aes_key: None,
-        }
-    }
+    /// The userid of the person who bound this bot.
+    /// Auto-recorded from the first DM received by the gateway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -39,6 +32,9 @@ pub struct WeComGatewayStatusResponse {
     pub status: WeComGatewayStatus,
     pub error_message: Option<String>,
     pub bot_id: Option<String>,
+    /// Active session keys (e.g. "wecom:dm:userid", "wecom:chatid")
+    #[serde(default)]
+    pub active_sessions: Vec<String>,
 }
 
 impl Default for WeComGatewayStatusResponse {
@@ -47,6 +43,7 @@ impl Default for WeComGatewayStatusResponse {
             status: WeComGatewayStatus::Disconnected,
             error_message: None,
             bot_id: None,
+            active_sessions: Vec::new(),
         }
     }
 }

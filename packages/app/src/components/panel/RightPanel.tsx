@@ -1,40 +1,34 @@
-import { TodoList } from '@/components/chat/TodoList'
 import { SessionDiffPanel } from '@/components/chat/SessionDiffPanel'
 import { SessionList } from '@/components/chat/SessionList'
 import { FileBrowser } from '@/components/workspace/FileBrowser'
 import { ShortcutsPanel } from './ShortcutsPanel'
+import { KnowledgeBrowser } from '@/components/knowledge/KnowledgeBrowser'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { useSessionStore } from '@/stores/session'
-import type { Todo, FileDiff } from '@/lib/opencode/sdk-types'
+import type { FileDiff } from '@/lib/opencode/sdk-types'
+import type { ComponentProps } from 'react'
 
 interface RightPanelProps {
-  todos?: Todo[]
   diff?: FileDiff[]
   // Override the active tab from store
-  defaultTab?: 'tasks' | 'diff' | 'files' | 'session' | 'shortcuts'
+  defaultTab?: 'diff' | 'files' | 'session' | 'shortcuts' | 'knowledge'
   // Compact mode for file mode layout
   compact?: boolean
+  knowledgeBrowserProps?: ComponentProps<typeof KnowledgeBrowser>
 }
 
-export function RightPanel({ todos, diff, defaultTab, compact }: RightPanelProps) {
+export function RightPanel({ diff, defaultTab, compact, knowledgeBrowserProps }: RightPanelProps) {
   const storeActiveTab = useWorkspaceStore(s => s.activeTab)
-  const sessionTodos = useSessionStore(s => s.todos)
   const sessionDiff = useSessionStore(s => s.sessionDiff)
-  
+
   // Use defaultTab if provided, otherwise use store's activeTab
   const activeTab = defaultTab || storeActiveTab
-  
-  // Use props or fall back to store data
-  const todosData = todos ?? sessionTodos
   const diffData = diff ?? sessionDiff
 
   return (
     <div className={`h-full overflow-auto ${activeTab === 'files' || activeTab === 'session' ? '' : (compact ? 'p-1' : 'p-2')}`}>
       {activeTab === 'shortcuts' && (
         <ShortcutsPanel />
-      )}
-      {activeTab === 'tasks' && (
-        <TasksTab todos={todosData} compact={compact} />
       )}
       {activeTab === 'diff' && (
         <DiffTab diff={diffData} compact={compact} />
@@ -45,21 +39,11 @@ export function RightPanel({ todos, diff, defaultTab, compact }: RightPanelProps
       {activeTab === 'session' && (
         <SessionList compact={compact} />
       )}
+      {activeTab === 'knowledge' && (
+        <KnowledgeBrowser {...knowledgeBrowserProps} />
+      )}
     </div>
   )
-}
-
-// Tasks tab content
-function TasksTab({ todos, compact }: { todos: Todo[], compact?: boolean }) {
-  if (todos.length === 0) {
-    return (
-      <div className={`text-muted-foreground text-center ${compact ? 'text-xs py-3' : 'text-xs py-4'}`}>
-        No tasks yet
-      </div>
-    )
-  }
-
-  return <TodoList todos={todos} compact={compact} />
 }
 
 // Diff tab content

@@ -20,6 +20,7 @@ import {
   RotateCw,
   Files,
   Eye,
+  History,
 } from "lucide-react";
 import { cn, isTauri } from "@/lib/utils";
 import { TEAM_REPO_DIR } from "@/lib/build-config";
@@ -32,7 +33,6 @@ import { useSessionStore } from "@/stores/session";
 import { useUIStore } from "@/stores/ui";
 import { useWorkspaceStore } from "@/stores/workspace";
 import { useTeamModeStore } from "@/stores/team-mode";
-import { useGitStatus } from "@/hooks/use-git-status";
 import { gitManager } from "@/lib/git/manager";
 import { Button } from "@/components/ui/button";
 import {
@@ -52,6 +52,7 @@ const LazyTiptapMarkdownEditor = lazy(
 );
 const LazyCodeEditor = lazy(() => import("@/components/editors/CodeEditor"));
 const LazyDiffRenderer = lazy(() => import("@/components/diff/DiffRenderer"));
+const LazyFileHistoryView = lazy(() => import("@/components/history/FileHistoryView"));
 
 // Viewers - lazy loaded
 const LazyPDFViewer = lazy(
@@ -96,6 +97,7 @@ export function ImageViewer({
   const [zoom, setZoom] = useState(100);
   const [rotation, setRotation] = useState(0);
   const isSvg = filename.toLowerCase().endsWith(".svg");
+  const workspacePath = useWorkspaceStore((s) => s.workspacePath);
 
   const handleZoomIn = () => setZoom((prev) => Math.min(prev + 25, 300));
   const handleZoomOut = () => setZoom((prev) => Math.max(prev - 25, 25));
@@ -105,6 +107,11 @@ export function ImageViewer({
     setRotation(0);
   };
 
+  const displayPath =
+    workspacePath && filePath.startsWith(workspacePath + "/")
+      ? filePath.slice(workspacePath.length + 1)
+      : filePath;
+
   return (
     <div className="flex flex-col h-full" data-testid="file-editor">
       {/* Header - simple and clean */}
@@ -112,7 +119,7 @@ export function ImageViewer({
         {/* Full file path */}
         <div className="flex items-center gap-2 min-w-0 flex-1">
           <Image className="h-4 w-4 text-muted-foreground shrink-0" />
-          <span className="text-xs text-muted-foreground truncate">{filePath}</span>
+          <span className="text-xs text-muted-foreground truncate">{displayPath}</span>
         </div>
 
         {/* Zoom controls */}
@@ -368,6 +375,7 @@ export function FileEditor({
   const [isSaving, setIsSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
   const [showDiff, setShowDiff] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
   const [showPreview, setShowPreview] = useState(supportsPreview(filename) === "html");
   const [showCloseConfirm, setShowCloseConfirm] = useState(false);
   const [externalUpdateType, setExternalUpdateType] = useState<
@@ -376,7 +384,7 @@ export function FileEditor({
   const previousContentRef = useRef(content);
 
   // --- Markdown auto-save & conflict state ---
-  const isMarkdown = getEditorType(filename) === "markdown";
+  const isMarkdown = supportsPreview(filename) === "markdown";
   const tiptapEditorRef = useRef<import("@/components/editors/TiptapMarkdownEditor").TiptapEditorHandle>(null);
 
   // Conflict state for markdown files
@@ -391,38 +399,43 @@ export function FileEditor({
     enabled: isMarkdown,
   });
 
-  // Git status integration (hook called for side effects)
-  useGitStatus();
-
   // Git HEAD content for git gutter decorations
   const [gitHeadContent, setGitHeadContent] = useState<string | null>(null);
   const workspacePath = useWorkspaceStore((s) => s.workspacePath);
+  const displayPath =
+    workspacePath && filePath && filePath.startsWith(workspacePath + "/")
+      ? filePath.slice(workspacePath.length + 1)
+      : (filePath ?? "");
 
-  // Fetch the file's content from git HEAD for gutter decorations
+  const teamRepoPath = useMemo(
+    () =>
+      workspacePath ? `${workspacePath.replace(/\/+$/, '')}/${TEAM_REPO_DIR}` : null,
+    [workspacePath],
+  )
+
+  const relativeTeamPath = useMemo(() => {
+    if (!teamRepoPath || !filePath) return null
+    const norm = filePath.replace(/\/+$/, '')
+    if (!norm.startsWith(teamRepoPath + '/')) return null
+    return norm.slice(teamRepoPath.length + 1)
+  }, [teamRepoPath, filePath])
+
+  // Fetch the file's content from git HEAD for gutter decorations (team files only)
   useEffect(() => {
-    if (!isTauri() || !workspacePath || !filePath) return;
+    if (!isTauri() || !teamRepoPath || !relativeTeamPath || !isTeamFile) {
+      setGitHeadContent(null);
+      return;
+    }
 
     let cancelled = false;
 
     (async () => {
       try {
-        // Compute relative path within workspace
-        const normalizedWorkspace = workspacePath.replace(/\/+$/, "");
-        const normalizedFile = filePath.replace(/\/+$/, "");
-        let relativePath = normalizedFile;
-        if (normalizedFile.startsWith(normalizedWorkspace + "/")) {
-          relativePath = normalizedFile.slice(normalizedWorkspace.length + 1);
-        }
-
-        const headContent = await gitManager.showFile(
-          normalizedWorkspace,
-          relativePath,
-        );
+        const headContent = await gitManager.showFile(teamRepoPath, relativeTeamPath);
         if (!cancelled) {
           setGitHeadContent(headContent);
         }
       } catch {
-        // Not a git repo, file not tracked, etc.
         if (!cancelled) {
           setGitHeadContent(null);
         }
@@ -432,7 +445,7 @@ export function FileEditor({
     return () => {
       cancelled = true;
     };
-  }, [workspacePath, filePath]);
+  }, [teamRepoPath, relativeTeamPath, isTeamFile]);
 
   // Check if this file supports preview
   const previewType = supportsPreview(filename);
@@ -699,7 +712,7 @@ export function FileEditor({
         {/* Full file path with status indicator */}
         <div className="flex items-center gap-2 min-w-0 flex-1">
           <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
-          <span className="text-xs text-muted-foreground truncate">{filePath}</span>
+          <span className="text-xs text-muted-foreground truncate">{displayPath}</span>
           {isMarkdown ? (
             renderSaveStatusIndicator()
           ) : (
@@ -724,7 +737,7 @@ export function FileEditor({
                   ? "text-blue-600 hover:bg-blue-100 dark:hover:bg-blue-900/30"
                   : "text-muted-foreground/50"
               }`}
-              title={isModified ? `Save (⌘S)` : t("app.noChanges", "No changes")}
+              title={isModified ? `${t("common.save", "Save")} (⌘S)` : t("app.noChanges", "No changes")}
             >
               {isSaving ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -760,7 +773,14 @@ export function FileEditor({
           {/* Diff toggle - icon only */}
           {hasChanges && (
             <button
-              onClick={() => setShowDiff(!showDiff)}
+              onClick={() => {
+                if (showDiff) {
+                  setShowDiff(false);
+                } else {
+                  setShowDiff(true);
+                  setShowHistory(false);
+                }
+              }}
               className={`p-1.5 rounded transition-colors ${
                 showDiff
                   ? "text-primary bg-primary/10"
@@ -777,6 +797,27 @@ export function FileEditor({
               ) : (
                 <GitCompare className="h-4 w-4" />
               )}
+            </button>
+          )}
+
+          {isTeamFile && isTauri() && (
+            <button
+              onClick={() => {
+                if (showHistory) {
+                  setShowHistory(false);
+                } else {
+                  setShowHistory(true);
+                  setShowDiff(false);
+                }
+              }}
+              className={`p-1.5 rounded transition-colors ${
+                showHistory
+                  ? "text-primary bg-primary/10"
+                  : "text-muted-foreground hover:bg-muted"
+              }`}
+              title={t("app.viewHistory", "View history")}
+            >
+              <History className="h-4 w-4" />
             </button>
           )}
 
@@ -848,8 +889,23 @@ export function FileEditor({
 
       {/* Editor / Diff / Preview - file-type-routed */}
       <div className="flex-1 overflow-hidden">
-        {/* Conflict diff view for markdown */}
-        {isMarkdown && showConflictDiff && conflictAgentContent !== null ? (
+        {/* History view */}
+        {showHistory && teamRepoPath && relativeTeamPath ? (
+          <Suspense
+            fallback={
+              <div className="flex items-center justify-center h-full">
+                <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+              </div>
+            }
+          >
+            <LazyFileHistoryView
+              repoPath={teamRepoPath}
+              relativePath={relativeTeamPath}
+              filePath={filePath}
+              isDark={isDark}
+            />
+          </Suspense>
+        ) : isMarkdown && showConflictDiff && conflictAgentContent !== null ? (
           <Suspense
             fallback={
               <div className="flex items-center justify-center h-full">
@@ -889,7 +945,7 @@ export function FileEditor({
         ) : (
           (() => {
             // Route to appropriate editor based on file type
-            const editorType = getEditorType(filename, filePath);
+            const editorType = getEditorType(filename, filePath, content);
 
             if (editorType === "markdown") {
               return (

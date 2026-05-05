@@ -49,15 +49,14 @@ pub(crate) fn get_device_id() -> Result<String, String> {
             .map_err(|e| format!("Failed to generate random bytes: {e}"))?;
         let (node_id, key_bytes) = secret_key_to_node_id(&bytes);
         let dir = key_path.parent().unwrap();
-        std::fs::create_dir_all(dir)
-            .map_err(|e| format!("Failed to create iroh dir: {e}"))?;
+        std::fs::create_dir_all(dir).map_err(|e| format!("Failed to create iroh dir: {e}"))?;
         std::fs::write(&key_path, &key_bytes)
             .map_err(|e| format!("Failed to write iroh secret key: {e}"))?;
         info!("Generated new iroh secret key, node_id: {node_id}");
         return Ok(node_id);
     }
-    let bytes = std::fs::read(&key_path)
-        .map_err(|e| format!("Failed to read iroh secret key: {e}"))?;
+    let bytes =
+        std::fs::read(&key_path).map_err(|e| format!("Failed to read iroh secret key: {e}"))?;
     let bytes: [u8; 32] = bytes
         .try_into()
         .map_err(|_| "Secret key file has invalid length".to_string())?;
@@ -77,6 +76,7 @@ fn parse_doc_type(s: &str) -> Result<DocType, String> {
         "mcp" => Ok(DocType::Mcp),
         "knowledge" => Ok(DocType::Knowledge),
         "meta" => Ok(DocType::Meta),
+        "secrets" => Ok(DocType::Secrets),
         _ => Err(format!("Unknown doc type: {s}")),
     }
 }
@@ -176,13 +176,15 @@ pub async fn oss_create_team(
     llm_base_url: Option<String>,
     llm_model: Option<String>,
     llm_model_name: Option<String>,
+    llm_models: Option<String>,
 ) -> Result<OssTeamInfo, String> {
     let node_id = get_p2p_node_id_sync()?;
     let team_secret = generate_team_secret()?;
 
-    // Write LLM config to .teamclaw/teamclaw.json
-    let llm_config = super::team::build_llm_config(llm_base_url, llm_model, llm_model_name);
-    super::team::write_llm_config(&workspace_path, Some(&llm_config))?;
+    // Write LLM config to .teamclaw/teamclaw.json (only if user chose to host LLM)
+    let llm_config =
+        super::team::build_llm_config(llm_base_url, llm_model, llm_model_name, llm_models);
+    super::team::write_llm_config(&workspace_path, llm_config.as_ref())?;
     info!(
         "oss_create_team: wrote LLM config to {}/{}",
         super::TEAMCLAW_DIR,
@@ -256,6 +258,7 @@ pub async fn oss_create_team(
         node_id: node_id.clone(),
         name: owner_name.clone(),
         role: MemberRole::Owner,
+        shortcuts_role: Vec::new(),
         label: String::new(),
         platform: String::new(),
         arch: String::new(),
@@ -318,8 +321,7 @@ pub async fn oss_create_team(
         if let Some(shared_state) =
             app_handle.try_state::<crate::commands::shared_secrets::SharedSecretsState>()
         {
-            let team_dir_path =
-                std::path::Path::new(&workspace_path).join(super::TEAM_REPO_DIR);
+            let team_dir_path = std::path::Path::new(&workspace_path).join(super::TEAM_REPO_DIR);
             if let Err(e) = crate::commands::shared_secrets::init_shared_secrets(
                 &shared_state,
                 &team_secret,
@@ -403,6 +405,7 @@ pub async fn oss_join_team(
     llm_base_url: Option<String>,
     llm_model: Option<String>,
     llm_model_name: Option<String>,
+    llm_models: Option<String>,
 ) -> Result<OssJoinResult, String> {
     let node_id = get_p2p_node_id_sync()?;
 
@@ -495,9 +498,10 @@ pub async fn oss_join_team(
     }
     super::team::scaffold_team_dir(&team_dir)?;
 
-    // Write LLM config to .teamclaw/teamclaw.json
-    let llm_config = super::team::build_llm_config(llm_base_url, llm_model, llm_model_name);
-    super::team::write_llm_config(&workspace_path, Some(&llm_config))?;
+    // Write LLM config to .teamclaw/teamclaw.json (only if user chose to host LLM)
+    let llm_config =
+        super::team::build_llm_config(llm_base_url, llm_model, llm_model_name, llm_models);
+    super::team::write_llm_config(&workspace_path, llm_config.as_ref())?;
 
     // Cache team meta locally for fast restore
     if !team_data.is_empty() {
@@ -557,8 +561,7 @@ pub async fn oss_join_team(
         if let Some(shared_state) =
             app_handle.try_state::<crate::commands::shared_secrets::SharedSecretsState>()
         {
-            let team_dir_path =
-                std::path::Path::new(&workspace_path).join(super::TEAM_REPO_DIR);
+            let team_dir_path = std::path::Path::new(&workspace_path).join(super::TEAM_REPO_DIR);
             if let Err(e) = crate::commands::shared_secrets::init_shared_secrets(
                 &shared_state,
                 &team_secret,
@@ -623,11 +626,20 @@ pub async fn oss_restore_sync(
     team_id: String,
 ) -> Result<OssTeamInfo, String> {
     let t0 = std::time::Instant::now();
-    info!("[OssRestore] Starting oss_restore_sync for team {}", team_id);
+    info!(
+        "[OssRestore] Starting oss_restore_sync for team {}",
+        team_id
+    );
     let team_secret = load_team_secret(&workspace_path, &team_id)?;
-    info!("[OssRestore] team_secret loaded ({:.1}ms)", t0.elapsed().as_secs_f64() * 1000.0);
+    info!(
+        "[OssRestore] team_secret loaded ({:.1}ms)",
+        t0.elapsed().as_secs_f64() * 1000.0
+    );
     let node_id = get_p2p_node_id_sync()?;
-    info!("[OssRestore] Got node_id ({:.1}ms)", t0.elapsed().as_secs_f64() * 1000.0);
+    info!(
+        "[OssRestore] Got node_id ({:.1}ms)",
+        t0.elapsed().as_secs_f64() * 1000.0
+    );
 
     // Read existing config for team_endpoint and poll_interval
     let config = read_oss_config(&workspace_path)
@@ -655,7 +667,10 @@ pub async fn oss_restore_sync(
         "nodeId": node_id,
     });
     let resp = manager.call_fc("/token", &body).await?;
-    info!("[OssRestore] Token received ({:.1}ms)", t0.elapsed().as_secs_f64() * 1000.0);
+    info!(
+        "[OssRestore] Token received ({:.1}ms)",
+        t0.elapsed().as_secs_f64() * 1000.0
+    );
     manager.set_credentials(resp.credentials.clone(), resp.oss.clone());
 
     let role: MemberRole =
@@ -667,10 +682,16 @@ pub async fn oss_restore_sync(
         let _ = manager.restore_from_local_snapshot(doc_type);
         // Absorb local files the user added while offline into LoroDoc
         if let Err(e) = manager.write_doc_to_disk(doc_type) {
-            warn!("[OssRestore] write_doc_to_disk for {:?} failed: {}", doc_type, e);
+            warn!(
+                "[OssRestore] write_doc_to_disk for {:?} failed: {}",
+                doc_type, e
+            );
         }
     }
-    info!("[OssRestore] Local snapshots restored ({:.1}ms)", t0.elapsed().as_secs_f64() * 1000.0);
+    info!(
+        "[OssRestore] Local snapshots restored ({:.1}ms)",
+        t0.elapsed().as_secs_f64() * 1000.0
+    );
 
     // Read team_name from local _meta cache (written by create/join).
     // Falls back to "Team" if not cached yet — background sync will update.
@@ -680,8 +701,16 @@ pub async fn oss_restore_sync(
         .join("team-meta.json");
     let (team_name, owner_name) = if let Ok(data) = std::fs::read(&meta_cache_path) {
         let meta: Value = serde_json::from_slice(&data).unwrap_or(Value::Null);
-        let tn = meta.get("teamName").and_then(|v| v.as_str()).unwrap_or("Team").to_string();
-        let on = meta.get("ownerName").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let tn = meta
+            .get("teamName")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Team")
+            .to_string();
+        let on = meta
+            .get("ownerName")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         (tn, on)
     } else {
         ("Team".to_string(), String::new())
@@ -697,17 +726,20 @@ pub async fn oss_restore_sync(
 
     // Emit connected status immediately so the frontend listener picks it
     // up even if the command return is delayed by the Tauri message queue.
-    let _ = app_handle.emit("oss-sync-status", &SyncStatus {
-        connected: true,
-        syncing: true,
-        last_data_sync_at: None,
-        last_check_at: None,
-        next_sync_at: None,
-        health: SyncHealth::default(),
-        health_message: None,
-        skipped_files: Vec::new(),
-        docs: std::collections::HashMap::new(),
-    });
+    let _ = app_handle.emit(
+        "oss-sync-status",
+        &SyncStatus {
+            connected: true,
+            syncing: true,
+            last_data_sync_at: None,
+            last_check_at: None,
+            next_sync_at: None,
+            health: SyncHealth::default(),
+            health_message: None,
+            skipped_files: Vec::new(),
+            docs: std::collections::HashMap::new(),
+        },
+    );
 
     // Trigger an immediate background sync so updates arrive quickly
     // without waiting for the first poll interval.
@@ -733,10 +765,16 @@ pub async fn oss_restore_sync(
 
                 for doc_type in DocType::all() {
                     if let Err(e) = manager.pull_remote_changes(doc_type).await {
-                        warn!("[OssRestore] Background pull for {:?} failed: {}", doc_type, e);
+                        warn!(
+                            "[OssRestore] Background pull for {:?} failed: {}",
+                            doc_type, e
+                        );
                     }
                     if let Err(e) = manager.write_doc_to_disk(doc_type) {
-                        warn!("[OssRestore] Background write_doc_to_disk for {:?} failed: {}", doc_type, e);
+                        warn!(
+                            "[OssRestore] Background write_doc_to_disk for {:?} failed: {}",
+                            doc_type, e
+                        );
                     }
                 }
                 let now = Utc::now().to_rfc3339();
@@ -754,8 +792,7 @@ pub async fn oss_restore_sync(
         if let Some(shared_state) =
             app_handle.try_state::<crate::commands::shared_secrets::SharedSecretsState>()
         {
-            let team_dir_path =
-                std::path::Path::new(&workspace_path).join(super::TEAM_REPO_DIR);
+            let team_dir_path = std::path::Path::new(&workspace_path).join(super::TEAM_REPO_DIR);
             if let Err(e) = crate::commands::shared_secrets::init_shared_secrets(
                 &shared_state,
                 &team_secret,
@@ -766,7 +803,10 @@ pub async fn oss_restore_sync(
         }
     }
 
-    info!("[OssRestore] Connected in {:.1}ms (sync continues in background)", t0.elapsed().as_secs_f64() * 1000.0);
+    info!(
+        "[OssRestore] Connected in {:.1}ms (sync continues in background)",
+        t0.elapsed().as_secs_f64() * 1000.0
+    );
 
     Ok(OssTeamInfo {
         team_id,
@@ -972,10 +1012,7 @@ pub async fn oss_cleanup_updates(
 }
 
 #[tauri::command]
-pub async fn oss_delete_s3_key(
-    state: State<'_, OssSyncState>,
-    key: String,
-) -> Result<(), String> {
+pub async fn oss_delete_s3_key(state: State<'_, OssSyncState>, key: String) -> Result<(), String> {
     let guard = state.manager.lock().await;
     let manager = guard
         .as_ref()
@@ -1040,9 +1077,40 @@ pub async fn oss_get_team_config(workspace_path: String) -> Result<Option<OssTea
     Ok(read_oss_config(&workspace_path))
 }
 
+/// Update the FC endpoint and/or LLM config for an existing OSS team.
+/// Called from the "服务配置" section when the team is already connected.
+#[tauri::command]
+pub async fn oss_update_service_config(
+    workspace_path: String,
+    team_endpoint: Option<String>,
+    llm_base_url: Option<String>,
+    llm_model: Option<String>,
+    llm_model_name: Option<String>,
+    llm_models: Option<String>,
+) -> Result<(), String> {
+    // Update FC endpoint in oss.json if provided
+    if let Some(ref new_endpoint) = team_endpoint {
+        if let Some(mut config) = read_oss_config(&workspace_path) {
+            config.team_endpoint = new_endpoint.clone();
+            write_oss_config(&workspace_path, &config)?;
+            info!(
+                "oss_update_service_config: updated team_endpoint to {}",
+                new_endpoint
+            );
+        }
+    }
+
+    // Update LLM config in teamclaw.json
+    let llm_config =
+        super::team::build_llm_config(llm_base_url, llm_model, llm_model_name, llm_models);
+    super::team::write_llm_config(&workspace_path, llm_config.as_ref())?;
+    info!("oss_update_service_config: updated LLM config");
+
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn oss_apply_team(
-
     workspace_path: String,
     team_id: String,
     team_secret: String,
@@ -1139,6 +1207,7 @@ pub async fn oss_approve_application(
         node_id: node_id.clone(),
         name: name.clone(),
         role: member_role,
+        shortcuts_role: Vec::new(),
         label: String::new(),
         platform: String::new(),
         arch: String::new(),
@@ -1157,4 +1226,66 @@ pub async fn oss_approve_application(
 
     info!("Approved application for nodeId: {node_id}");
     Ok(())
+}
+
+#[tauri::command]
+pub async fn oss_mark_file_deleted(
+    state: State<'_, OssSyncState>,
+    doc_type: String,
+    path: String,
+) -> Result<bool, String> {
+    let dt = parse_doc_type(&doc_type)?;
+    let mut guard = state.manager.lock().await;
+    let manager = guard
+        .as_mut()
+        .ok_or_else(|| "OSS sync not active".to_string())?;
+
+    manager.mark_file_deleted(dt, &path).await
+}
+
+/// List S3 keys for a doc type — returns snapshots and updates keys for debugging.
+#[tauri::command]
+pub async fn oss_list_remote_keys(
+    state: State<'_, OssSyncState>,
+    doc_type: String,
+) -> Result<serde_json::Value, String> {
+    let dt = parse_doc_type(&doc_type)?;
+    let guard = state.manager.lock().await;
+    let manager = guard
+        .as_ref()
+        .ok_or_else(|| "OSS sync not active".to_string())?;
+
+    manager.list_remote_keys(dt).await
+}
+
+/// Dump the CRDT state for a doc type — returns all file entries with their
+/// deleted status, content length, and version count for debugging.
+#[tauri::command]
+pub async fn oss_dump_crdt(
+    state: State<'_, OssSyncState>,
+    doc_type: String,
+) -> Result<serde_json::Value, String> {
+    let dt = parse_doc_type(&doc_type)?;
+    let guard = state.manager.lock().await;
+    let manager = guard
+        .as_ref()
+        .ok_or_else(|| "OSS sync not active".to_string())?;
+
+    manager.dump_crdt_state(dt)
+}
+
+/// Restore all deleted entries in a doc type from their archived versions.
+/// This is a recovery command for when deletions were propagated incorrectly.
+#[tauri::command]
+pub async fn oss_restore_deleted(
+    state: State<'_, OssSyncState>,
+    doc_type: String,
+) -> Result<u32, String> {
+    let dt = parse_doc_type(&doc_type)?;
+    let mut guard = state.manager.lock().await;
+    let manager = guard
+        .as_mut()
+        .ok_or_else(|| "OSS sync not active".to_string())?;
+
+    manager.restore_deleted_entries(dt).await
 }

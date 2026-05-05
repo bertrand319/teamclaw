@@ -1,36 +1,45 @@
+pub mod app_settings;
 pub mod clawhub;
-pub mod device_token;
 pub mod cron;
 pub mod deps;
+pub mod device_token;
 pub mod env_vars;
 pub mod filewatcher;
 pub mod gateway;
 pub mod git;
+pub mod introspect_api;
 pub mod knowledge;
+pub mod local_secret_store;
 pub mod local_stats;
 pub mod mcp;
 pub mod opencode;
 pub mod oss_commands;
-pub mod shared_secrets_crypto;
-pub mod shared_secrets;
 pub mod oss_sync;
 pub mod oss_types;
 pub mod p2p_state;
 pub mod rag_http_server;
+pub mod shared_secrets;
+pub mod shared_secrets_crypto;
 pub mod skillssh;
 pub mod spotlight;
 pub mod stt;
 pub mod team;
 #[cfg(feature = "p2p")]
 pub mod team_p2p;
-pub mod trash;
+pub mod team_sync_all;
 pub mod team_unified;
 pub mod team_webdav;
+pub mod trash;
 pub mod updater;
 pub mod version_commands;
 pub mod version_store;
 pub mod version_types;
 pub mod webview;
+pub mod window;
+pub mod workspace_files;
+
+#[cfg(target_os = "windows")]
+use crate::process_util::CommandNoWindow;
 
 /// The short application name, injected at compile time via `build.rs`.
 #[allow(dead_code)]
@@ -96,6 +105,7 @@ pub fn open_with_default_app(path: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         std::process::Command::new("cmd")
+            .no_window()
             .args(["/C", "start", "", &path])
             .spawn()
             .map_err(|e| format!("Failed to open file: {}", e))?;
@@ -125,7 +135,10 @@ pub fn open_in_terminal(path: String) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
+        // Hide the outer launcher's console; `start` spawns the user-visible
+        // terminal in its own new console as intended.
         std::process::Command::new("cmd")
+            .no_window()
             .args(["/C", "start", "cmd", "/K", &format!("cd /d {}", path)])
             .spawn()
             .map_err(|e| format!("Failed to open terminal: {}", e))?;

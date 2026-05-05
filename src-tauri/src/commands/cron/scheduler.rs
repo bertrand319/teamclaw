@@ -10,6 +10,7 @@ use super::delivery::DeliveryManager;
 use super::storage::CronStorage;
 use super::types::*;
 use crate::commands::gateway::SessionMapping;
+use crate::process_util::CommandNoWindow;
 
 /// The cron scheduler that runs as a background task
 #[derive(Debug)]
@@ -291,9 +292,7 @@ impl CronScheduler {
                 None => {
                     // Compute next_run_at if missing
                     if let Some(next) = self.compute_next_run(&job, None) {
-                        self.storage
-                            .update_next_run_at(&job.id, Some(next))
-                            .await;
+                        self.storage.update_next_run_at(&job.id, Some(next)).await;
                         false
                     } else {
                         false
@@ -326,6 +325,7 @@ impl CronScheduler {
     /// Create a git worktree for isolated job execution.
     fn create_worktree(workspace: &str, worktree_path: &str, branch: &str) -> Result<(), String> {
         let output = std::process::Command::new("git")
+            .no_window()
             .current_dir(workspace)
             .args(["worktree", "add", "--detach", worktree_path, branch])
             .output()
@@ -346,6 +346,7 @@ impl CronScheduler {
     /// Remove a git worktree. Falls back to rm -rf + prune if git remove fails.
     fn remove_worktree(workspace: &str, worktree_path: &str) {
         let result = std::process::Command::new("git")
+            .no_window()
             .current_dir(workspace)
             .args(["worktree", "remove", "--force", worktree_path])
             .output();
@@ -361,6 +362,7 @@ impl CronScheduler {
                 );
                 let _ = std::fs::remove_dir_all(worktree_path);
                 let _ = std::process::Command::new("git")
+                    .no_window()
                     .current_dir(workspace)
                     .args(["worktree", "prune"])
                     .output();
@@ -1226,7 +1228,11 @@ mod tests {
         let result = scheduler.compute_next_run(&job, None);
         // Allow up to 1 second of rounding drift from to_rfc3339/parse
         let diff = (result.unwrap() - future).num_seconds().abs();
-        assert!(diff <= 1, "Expected timestamp close to future, got diff={}", diff);
+        assert!(
+            diff <= 1,
+            "Expected timestamp close to future, got diff={}",
+            diff
+        );
     }
 
     #[test]
@@ -1336,7 +1342,11 @@ mod tests {
         let anchor = Utc.with_ymd_and_hms(2024, 6, 1, 12, 1, 0).unwrap();
         let result = scheduler.compute_next_run(&job, Some(anchor)).unwrap();
         let diff_secs = (result - anchor).num_seconds();
-        assert!(diff_secs > 0 && diff_secs <= 300, "Expected ≤5 min gap, got {}s", diff_secs);
+        assert!(
+            diff_secs > 0 && diff_secs <= 300,
+            "Expected ≤5 min gap, got {}s",
+            diff_secs
+        );
     }
 
     #[test]
@@ -1416,7 +1426,10 @@ mod tests {
         });
         // Should not panic; falls back to system local — just assert it returns Some
         let result = scheduler.compute_next_run(&job, None);
-        assert!(result.is_some(), "Expected a fallback next-run time for unknown timezone");
+        assert!(
+            result.is_some(),
+            "Expected a fallback next-run time for unknown timezone"
+        );
     }
 
     // ── delivery_to_session_key ───────────────────────────────────────────────

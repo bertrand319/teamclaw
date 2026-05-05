@@ -19,11 +19,10 @@ import {
   Copy,
   Check,
 } from 'lucide-react'
-import { invoke } from '@tauri-apps/api/core'
 import { useProviderStore } from '@/stores/provider'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { useTeamModeStore } from '@/stores/team-mode'
-import { initOpenCodeClient } from '@/lib/opencode/sdk-client'
+import { restartOpencode } from '@/lib/opencode/restart'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -103,6 +102,8 @@ export const LLMSection = React.memo(function LLMSection() {
   const [oauthPending, setOAuthPending] = React.useState(false)
   const [oauthInstructions, setOAuthInstructions] = React.useState('')
   const [oauthUrl, setOAuthUrl] = React.useState('')
+  const [oauthMethodType, setOAuthMethodType] = React.useState<'auto' | 'code' | null>(null)
+  const [oauthCodeInput, setOAuthCodeInput] = React.useState('')
   const [oauthCodeCopied, setOAuthCodeCopied] = React.useState(false)
 
   // Disconnect confirmation state
@@ -153,25 +154,14 @@ export const LLMSection = React.memo(function LLMSection() {
     }
   }, [openCodeReady])
 
-  // Restart OpenCode sidecar so newly connected providers take effect
   const restartOpenCodeAndRefresh = async () => {
     if (!workspacePath) return
-    const { setOpenCodeBootstrapped, setOpenCodeReady } = useWorkspaceStore.getState()
     try {
-      setOpenCodeBootstrapped(false)
-      await invoke('stop_opencode')
-      const status = await invoke<{ url: string }>('start_opencode', {
-        config: { workspace_path: workspacePath },
-      })
-      // Pass workspacePath so API requests include the directory param
-      initOpenCodeClient({ baseUrl: status.url, workspacePath })
-      setOpenCodeBootstrapped(true, status.url)
-      setOpenCodeReady(true, status.url)
+      await restartOpencode(workspacePath)
       await initAll()
     } catch (err) {
       console.error('Failed to restart OpenCode after provider connect:', err)
-      setOpenCodeBootstrapped(false)
-      // Fallback: just refresh without restart
+      useWorkspaceStore.getState().setOpenCodeBootstrapped(false)
       await Promise.all([refreshProviders(), refreshConfiguredProviders()])
     }
   }
@@ -188,6 +178,8 @@ export const LLMSection = React.memo(function LLMSection() {
     setOAuthPending(false)
     setOAuthInstructions('')
     setOAuthUrl('')
+    setOAuthMethodType(null)
+    setOAuthCodeInput('')
     setConnectDialogOpen(true)
   }
 
@@ -217,16 +209,42 @@ export const LLMSection = React.memo(function LLMSection() {
     await open(result.url)
     setOAuthUrl(result.url)
     setOAuthInstructions(result.instructions)
+    setOAuthMethodType(result.methodType)
+    setOAuthCodeInput('')
     setOAuthPending(true)
     setIsConnecting(false)
-    // For Device Flow ("auto"), sidecar polls internally — kick off callback in background
-    completeOAuthCallback(connectingProviderId, methodIndex).then((success) => {
+    if (result.methodType === 'auto') {
+      // For Device Flow ("auto"), sidecar polls internally — kick off callback in background
+      completeOAuthCallback(connectingProviderId, methodIndex).then((success) => {
+        if (success) {
+          setConnectDialogOpen(false)
+          setOAuthPending(false)
+          setOAuthMethodType(null)
+          setOAuthCodeInput('')
+          restartOpenCodeAndRefresh()
+        }
+      })
+    }
+  }
+
+  const handleOAuthCodeSubmit = async () => {
+    const code = oauthCodeInput.trim()
+    if (!code) return
+    const methodIndex = getProviderOAuthMethodIndex(connectingProviderId)
+    if (methodIndex === -1) return
+    setIsConnecting(true)
+    try {
+      const success = await completeOAuthCallback(connectingProviderId, methodIndex, code)
       if (success) {
         setConnectDialogOpen(false)
         setOAuthPending(false)
-        restartOpenCodeAndRefresh()
+        setOAuthMethodType(null)
+        setOAuthCodeInput('')
+        await restartOpenCodeAndRefresh()
       }
-    })
+    } finally {
+      setIsConnecting(false)
+    }
   }
 
   const handleCopyOAuthCode = async () => {
@@ -403,7 +421,11 @@ export const LLMSection = React.memo(function LLMSection() {
     }
   }
 
-  if (teamMode && !devUnlocked) {
+  const teamModelOptions = useTeamModeStore((s) => s.teamModelOptions)
+  const switchTeamModel = useTeamModeStore((s) => s.switchTeamModel)
+
+  if (teamMode && teamModelConfig && !devUnlocked) {
+    const hasMultipleModels = teamModelOptions.length > 1
     return (
       <div className="space-y-6">
         <SectionHeader
@@ -417,13 +439,35 @@ export const LLMSection = React.memo(function LLMSection() {
             <div className="h-9 w-9 rounded-lg flex items-center justify-center bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-400">
               <Shield className="h-4.5 w-4.5" />
             </div>
-            <div>
+            <div className="flex-1">
               <p className="text-sm font-medium">{t('settings.llm.managedByTeam', 'Managed by team')}</p>
-              <p className="text-xs text-muted-foreground">
-                {t('settings.llm.managedByTeamDesc', 'Model configuration is managed by team admin, no personal configuration needed.')}
-              </p>
+              {hasMultipleModels ? (
+                <div className="flex items-center gap-1.5 mt-2">
+                  {teamModelOptions.map((option) => {
+                    const isActive = teamModelConfig?.model === option.id
+                    return (
+                      <button
+                        key={option.id}
+                        onClick={() => workspacePath && switchTeamModel(option.id, workspacePath)}
+                        className={cn(
+                          'px-3 py-1.5 rounded-md text-xs font-medium transition-colors',
+                          isActive
+                            ? 'bg-violet-600 text-white'
+                            : 'bg-muted text-muted-foreground hover:bg-muted/80',
+                        )}
+                      >
+                        {option.name}
+                      </button>
+                    )
+                  })}
+                </div>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  {t('settings.llm.managedByTeamDesc', 'Model configuration is managed by team admin, no personal configuration needed.')}
+                </p>
+              )}
               {teamModelConfig && (
-                <p className="text-xs text-muted-foreground mt-1">
+                <p className="text-xs text-muted-foreground mt-1.5">
                   {teamModelConfig.modelName} · {teamModelConfig.baseUrl}
                 </p>
               )}
@@ -646,7 +690,13 @@ export const LLMSection = React.memo(function LLMSection() {
 
       {/* Connect Provider Dialog */}
       <Dialog open={connectDialogOpen} onOpenChange={(open) => {
-        if (!open) { setOAuthPending(false); setOAuthInstructions(''); setOAuthUrl('') }
+        if (!open) {
+          setOAuthPending(false)
+          setOAuthInstructions('')
+          setOAuthUrl('')
+          setOAuthMethodType(null)
+          setOAuthCodeInput('')
+        }
         setConnectDialogOpen(open)
       }}>
         <DialogContent className="sm:max-w-md">
@@ -673,10 +723,27 @@ export const LLMSection = React.memo(function LLMSection() {
                   </Button>
                 )}
               </div>
-              <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
-                {t('settings.llm.oauthPolling', 'Waiting for authorization...')}
-              </div>
+              {oauthMethodType === 'code' ? (
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">{t('settings.llm.authorizationCode', 'Authorization code')}</label>
+                  <Input
+                    value={oauthCodeInput}
+                    onChange={(e) => setOAuthCodeInput(e.target.value)}
+                    placeholder={t('settings.llm.authorizationCodePlaceholder', 'Paste authorization code')}
+                    className="h-10"
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && oauthCodeInput.trim()) {
+                        handleOAuthCodeSubmit()
+                      }
+                    }}
+                  />
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
+                  {t('settings.llm.oauthPolling', 'Waiting for authorization...')}
+                </div>
+              )}
               <Button variant="outline" size="sm" className="gap-2 w-full" onClick={async () => {
                 const { open } = await import('@tauri-apps/plugin-shell')
                 open(oauthUrl)
@@ -745,11 +812,35 @@ export const LLMSection = React.memo(function LLMSection() {
           <DialogFooter>
             <Button
               variant="outline"
-              onClick={() => { setOAuthPending(false); setConnectDialogOpen(false) }}
+              onClick={() => {
+                setOAuthPending(false)
+                setOAuthMethodType(null)
+                setOAuthCodeInput('')
+                setConnectDialogOpen(false)
+              }}
               disabled={isConnecting}
             >
               {t('common.cancel', 'Cancel')}
             </Button>
+            {oauthPending && oauthMethodType === 'code' && (
+              <Button
+                onClick={handleOAuthCodeSubmit}
+                disabled={isConnecting || !oauthCodeInput.trim()}
+                className="gap-2"
+              >
+                {isConnecting ? (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    {t('settings.llm.connecting', 'Connecting...')}
+                  </>
+                ) : (
+                  <>
+                    <Link className="h-4 w-4" />
+                    {t('settings.llm.completeAuthorization', 'Complete authorization')}
+                  </>
+                )}
+              </Button>
+            )}
             {!oauthPending && (
               <Button
                 onClick={handleConnectSubmit}

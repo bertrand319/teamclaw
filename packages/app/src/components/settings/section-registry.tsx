@@ -20,7 +20,6 @@ import { PermissionManagementSection } from './PermissionManagementSection'
 import { VoiceSection } from './VoiceSection'
 import { LeaderboardSection } from './LeaderboardSection'
 import { ShortcutsSection } from '@/components/shortcuts/ShortcutsSection'
-import { MobileRelaySettings } from './MobileRelaySettings'
 
 export const SETTINGS_SECTION_COMPONENTS: Record<SettingsSection, React.ComponentType> = {
   llm: LLMSection,
@@ -42,7 +41,6 @@ export const SETTINGS_SECTION_COMPONENTS: Record<SettingsSection, React.Componen
   permissions: PermissionManagementSection,
   leaderboard: LeaderboardSection,
   shortcuts: ShortcutsSection,
-  mobileRelay: MobileRelaySettings,
 }
 
 export function SettingsSectionBody({ section }: { section: SettingsSection }) {
@@ -50,7 +48,7 @@ export function SettingsSectionBody({ section }: { section: SettingsSection }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-muted/5">
       <ScrollArea className="h-full min-h-0 flex-1">
-        <div className={section === 'rolesSkills' ? "mx-auto max-w-[68rem] p-6" : "max-w-2xl mx-auto p-8"}>
+        <div className={section === 'rolesSkills' ? "mx-auto max-w-[68rem] p-6" : "max-w-2xl mx-auto p-8 pr-10"}>
           {React.createElement(Component)}
         </div>
       </ScrollArea>

@@ -5,6 +5,7 @@ import {
   lazy,
   Suspense,
   MouseEvent as ReactMouseEvent,
+  type ComponentType,
 } from "react";
 import { useTranslation } from "react-i18next";
 import { Toaster } from "sonner";
@@ -13,7 +14,6 @@ import { buildConfig } from "@/lib/build-config";
 import {
   AlertTriangle,
   Terminal,
-  ListTodo,
   FolderGit,
   FolderTree,
   ChevronLeft,
@@ -26,6 +26,7 @@ import {
   RotateCw,
   MessageSquarePlus,
   AppWindow,
+  Columns2,
 } from "lucide-react";
 // Spotlight window - lazy loaded for spotlight window label
 const SpotlightWindow = lazy(() =>
@@ -61,7 +62,6 @@ import {
   useResizablePanels,
 } from "@/hooks/useFileEditorState";
 import { useMCPFileWatcher } from "@/hooks/useMCPFileWatcher";
-import { useTeamModeStore } from "@/stores/team-mode";
 
 import {
   AppSidebar,
@@ -196,6 +196,14 @@ function useWebviewShortcuts() {
 // ChatPanel is always mounted to preserve state, hidden when a tab is active
 function MainContent() {
   const activeTab = useTabsStore(selectActiveTab);
+  const mainContentLayout = useUIStore((s) => s.mainContentLayout);
+  const splitContainerRef = useRef<HTMLDivElement | null>(null);
+  const [splitContainerWidth, setSplitContainerWidth] = useState(0);
+  const mainSplitLeftMaxWidth =
+    splitContainerWidth > 0 ? Math.max(360, splitContainerWidth - 280) : undefined;
+  const { mainSplitLeftWidth, handleMainSplitResize } = useResizablePanels({
+    mainSplitLeftMaxWidth,
+  });
   const selectedFile = useWorkspaceStore((s) => s.selectedFile);
   const fileContent = useWorkspaceStore((s) => s.fileContent);
   const isLoadingFile = useWorkspaceStore((s) => s.isLoadingFile);
@@ -235,12 +243,30 @@ function MainContent() {
     }
   }, [selectedFile]);
 
-  return (
-    <div className="relative h-full flex flex-col">
-      {/* Tab bar — shown when tabs exist */}
-      <TabBar />
+  useEffect(() => {
+    if (mainContentLayout !== "split") return;
+    const container = splitContainerRef.current;
+    if (!container) return;
 
-      {/* WebView toolbar — shown only when active tab is a webview */}
+    const updateWidth = () => {
+      setSplitContainerWidth(container.getBoundingClientRect().width);
+    };
+
+    updateWidth();
+
+    const observer = new ResizeObserver(() => {
+      updateWidth();
+    });
+    observer.observe(container);
+
+    return () => {
+      observer.disconnect();
+    };
+  }, [mainContentLayout]);
+
+  const fileArea = (
+    <div className="relative h-full flex flex-col">
+      <TabBar />
       {hasActiveTab && activeTab.type === "webview" && (
         <WebViewToolbar
           url={activeTab.target}
@@ -254,21 +280,10 @@ function MainContent() {
           onClose={() => useWebviewUIStore.getState().setShowFind(false)}
         />
       )}
-
       <div className="relative flex-1">
-        {/* ChatPanel - always mounted, hidden when a tab is active */}
-        <div
-          className={`absolute inset-0 ${hasActiveTab ? "invisible" : "visible"}`}
-        >
-          <ErrorBoundary scope="Chat" inline>
-            <ChatPanel />
-          </ErrorBoundary>
-        </div>
-
-        {/* Tab content overlay - shown when a tab is active */}
-        {hasActiveTab && (
+        {hasActiveTab ? (
           <div className={cn(
-            "absolute inset-0 z-10",
+            "absolute inset-0",
             activeTab.type === "webview" ? "bg-transparent pointer-events-none" : "bg-background"
           )}>
             {activeTab.type === "file" ? (
@@ -285,7 +300,51 @@ function MainContent() {
               <TabContentRenderer />
             )}
           </div>
+        ) : (
+          mainContentLayout === "split" ? (
+            <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+              Select a file or web tab
+            </div>
+          ) : null
         )}
+      </div>
+    </div>
+  );
+
+  if (mainContentLayout === "split") {
+    return (
+      <div
+        ref={splitContainerRef}
+        className="flex h-full min-h-0 overflow-hidden bg-background"
+        data-testid="main-content-split"
+      >
+        <div
+          className="min-w-0 shrink-0 overflow-hidden border-r border-border bg-background"
+          style={{ width: mainSplitLeftWidth }}
+        >
+          {fileArea}
+        </div>
+        <ResizeHandle
+          onResize={handleMainSplitResize}
+          className="bg-border/60 hover:bg-primary/50"
+          testId="main-content-split-resize-handle"
+        />
+        <div className="relative min-w-0 flex-1 overflow-hidden bg-background">
+          <ErrorBoundary scope="Chat" inline>
+            <ChatPanel />
+          </ErrorBoundary>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="relative h-full flex flex-col">
+      {fileArea}
+      <div className={`absolute inset-0 ${hasActiveTab ? "invisible" : "visible"}`}>
+        <ErrorBoundary scope="Chat" inline>
+          <ChatPanel />
+        </ErrorBoundary>
       </div>
     </div>
   );
@@ -299,7 +358,7 @@ function HeaderPanelTab({
   isActive,
   onClick,
 }: {
-  icon: typeof ListTodo;
+  icon: ComponentType<{ className?: string }>;
   label: string;
   count?: number;
   isActive: boolean;
@@ -407,10 +466,12 @@ function ResizeHandle({
   onResize,
   direction = "horizontal",
   className = "",
+  testId,
 }: {
   onResize: (delta: number) => void;
   direction?: "horizontal" | "vertical";
   className?: string;
+  testId?: string;
 }) {
   const [isDragging, setIsDragging] = useState(false);
   const startPosRef = useRef(0);
@@ -451,6 +512,7 @@ function ResizeHandle({
         transition-colors duration-150 flex-shrink-0 z-20
         ${className}
       `}
+      data-testid={testId}
       onMouseDown={handleMouseDown}
     >
       {/* Larger hit area */}
@@ -470,7 +532,6 @@ function AppContent() {
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   // Session store - individual selectors
   const getActiveSession = useSessionStore((s) => s.getActiveSession);
-  const todos = useSessionStore((s) => s.todos);
   const sessionDiff = useSessionStore((s) => s.sessionDiff);
   const sessions = useSessionStore((s) => s.sessions);
   const reloadActiveSessionMessages = useSessionStore(
@@ -494,7 +555,8 @@ function AppContent() {
   const layoutMode = useUIStore((s) => s.layoutMode);
   const fileModeRightTab = useUIStore((s) => s.fileModeRightTab);
   const setFileModeRightTab = useUIStore((s) => s.setFileModeRightTab);
-  const advancedMode = useUIStore((s) => s.advancedMode);
+  const mainContentLayout = useUIStore((s) => s.mainContentLayout);
+  const toggleMainContentLayout = useUIStore((s) => s.toggleMainContentLayout);
   const openSettings = useUIStore((s) => s.openSettings);
   const embeddedSettingsSection = useUIStore((s) => s.embeddedSettingsSection);
   const closeEmbeddedSettingsSection = useUIStore(
@@ -505,9 +567,12 @@ function AppContent() {
   const { state, open: sidebarOpen, setOpen: setSidebarOpen } = useSidebar();
   const hasActiveFileTab = !!useTabsStore(selectActiveTab);
   const hasHiddenTabs = useTabsStore(selectHasHiddenTabs);
-  /** Shortcuts always dock left; Files dock left only in default variant (workspace uses the right panel for Files). */
+  const workspaceUIVariant = isWorkspaceUIVariant();
+  /** Shortcuts/knowledge open in the left dock for both shells.
+   * Only the workspace shell temporarily replaces the sidebar with that dock. */
   const leftDockActive =
-    isPanelOpen && (activeTab === "shortcuts" || (!isWorkspaceUIVariant() && activeTab === "files"));
+    isPanelOpen &&
+    (activeTab === "shortcuts" || activeTab === "knowledge");
   const showRightWorkspacePanel = isPanelOpen && !leftDockActive;
   const isCollapsed = state === "collapsed";
   /** Native traffic lights sit over the left column; spare inset header when left dock owns that strip. */
@@ -603,7 +668,7 @@ function AppContent() {
   /** When left dock opens, hide the main sidebar; restore prior expansion when it closes. */
   const restoreSidebarAfterLeftDockRef = useRef<boolean | null>(null);
   useEffect(() => {
-    if (leftDockActive) {
+    if (leftDockActive && workspaceUIVariant) {
       if (restoreSidebarAfterLeftDockRef.current === null) {
         restoreSidebarAfterLeftDockRef.current = sidebarOpen;
         if (sidebarOpen) {
@@ -620,15 +685,17 @@ function AppContent() {
         setSidebarOpen(true);
       }
     }
-  }, [leftDockActive, sidebarOpen, setSidebarOpen, closePanel]);
+  }, [leftDockActive, workspaceUIVariant, sidebarOpen, setSidebarOpen, closePanel]);
 
   // Remove HTML skeleton once OpenCode server is bootstrapped (sessions can load)
+  // Also remove when workspace resolution completes with no workspace — otherwise
+  // the skeleton (z-index:9999) covers the WorkspacePrompt indefinitely.
   const openCodeBootstrapped = useWorkspaceStore((s) => s.openCodeBootstrapped);
   useEffect(() => {
-    if (openCodeBootstrapped || !isTauri()) {
+    if (openCodeBootstrapped || !isTauri() || (initialWorkspaceResolved && !workspacePath)) {
       document.getElementById('skeleton')?.remove();
     }
-  }, [openCodeBootstrapped]);
+  }, [openCodeBootstrapped, initialWorkspaceResolved, workspacePath]);
 
   // If settings is open, show settings page (check first so it works regardless of workspace state)
   if (currentView === "settings") {
@@ -833,17 +900,6 @@ function AppContent() {
               onClick={() => setFileModeRightTab("shortcuts")}
             />
             <HeaderPanelTab
-              icon={ListTodo}
-              label={t("navigation.tasks", "Tasks")}
-              count={
-                todos.filter(
-                  (t) => t.status !== "completed" && t.status !== "cancelled",
-                ).length
-              }
-              isActive={fileModeRightTab === "tasks"}
-              onClick={() => setFileModeRightTab("tasks")}
-            />
-            <HeaderPanelTab
               icon={FolderGit}
               label={t("navigation.changes", "Changes")}
               count={sessionDiff.length}
@@ -931,7 +987,6 @@ function AppContent() {
                   {(() => {
                     switch (fileModeRightTab) {
                       case "shortcuts": return t("navigation.shortcuts", "Shortcuts");
-                      case "tasks": return t("navigation.tasks", "Tasks");
                       case "changes": return t("navigation.changes", "Changes");
                       default: return t("navigation.files", "Files");
                     }
@@ -950,9 +1005,6 @@ function AppContent() {
               )}
               {fileModeRightTab === "changes" && (
                 <RightPanel defaultTab="diff" compact />
-              )}
-              {fileModeRightTab === "tasks" && (
-                <RightPanel defaultTab="tasks" compact />
               )}
               {fileModeRightTab === "files" && (
                 <RightPanel defaultTab="files" compact />
@@ -1007,14 +1059,14 @@ function AppContent() {
                     <ChevronLeft className="h-4 w-4" />
                   </Button>
                   <span className="min-w-0 truncate text-sm font-medium">
-                    {activeTab === "files"
-                      ? t("navigation.files", "Files")
+                    {activeTab === "knowledge"
+                      ? t("navigation.knowledge", "Knowledge")
                       : t("navigation.shortcuts", "Shortcuts")}
                   </span>
                   <div className="min-w-0 flex-1" data-tauri-drag-region />
                 </div>
                 <div className="min-h-0 flex-1 overflow-hidden">
-                  <RightPanel todos={todos} diff={sessionDiff} />
+                  <RightPanel diff={sessionDiff} />
                 </div>
               </>
             )}
@@ -1085,7 +1137,7 @@ function AppContent() {
 
             {/* Panel tabs - right side of header */}
             <div className="ml-auto flex shrink-0 items-center gap-0.5" data-onboarding-id="workspace-panel-tabs">
-              {(hasActiveFileTab || hasHiddenTabs) && (
+              {mainContentLayout === "stacked" && (hasActiveFileTab || hasHiddenTabs) && (
                 <button
                   className={cn(
                     "rounded p-1 transition-colors hover:bg-muted hover:text-foreground",
@@ -1107,32 +1159,23 @@ function AppContent() {
                 </button>
               )}
               <HeaderPanelTab
-                icon={ListTodo}
-                label={t("navigation.tasks", "Tasks")}
-                count={
-                  todos.filter(
-                    (t) => t.status !== "completed" && t.status !== "cancelled",
-                  ).length
-                }
-                isActive={isPanelOpen && activeTab === "tasks"}
-                onClick={() => isPanelOpen && activeTab === "tasks" ? closePanel() : openPanel("tasks")}
+                icon={FolderGit}
+                label={t("navigation.changes", "Changes")}
+                count={sessionDiff.length}
+                isActive={isPanelOpen && activeTab === "diff"}
+                onClick={() => isPanelOpen && activeTab === "diff" ? closePanel() : openPanel("diff")}
               />
-              {advancedMode && (
-                <HeaderPanelTab
-                  icon={FolderGit}
-                  label={t("navigation.changes", "Changes")}
-                  count={sessionDiff.length}
-                  isActive={isPanelOpen && activeTab === "diff"}
-                  onClick={() => isPanelOpen && activeTab === "diff" ? closePanel() : openPanel("diff")}
-                />
-              )}
-              {isWorkspaceUIVariant() && (
-                <HeaderPanelTab
-                  icon={FolderTree}
-                  label={t("navigation.files", "Files")}
-                  isActive={isPanelOpen && activeTab === "files"}
-                  onClick={() => isPanelOpen && activeTab === "files" ? closePanel() : openPanel("files")}
-                />
+              {!workspaceUIVariant && (
+                <button
+                  className="rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  onClick={toggleMainContentLayout}
+                  title={mainContentLayout === "stacked"
+                    ? t("app.switchToSplitLayout", "Switch to split layout")
+                    : t("app.switchToStackedLayout", "Switch to stacked layout")
+                  }
+                >
+                  <Columns2 className="h-4 w-4" />
+                </button>
               )}
               {showRightWorkspacePanel && (
                 <button
@@ -1169,7 +1212,7 @@ function AppContent() {
         >
           <div className="h-full w-72">
             {showRightWorkspacePanel && (
-              <RightPanel todos={todos} diff={sessionDiff} />
+              <RightPanel diff={sessionDiff} />
             )}
           </div>
         </div>
@@ -1219,20 +1262,14 @@ function App() {
   const openCodeReady = useWorkspaceStore((s) => s.openCodeReady);
   const { showSetupGuide, dependencies, handleRecheck, handleSetupContinue } = useSetupGuide(openCodeReady);
   const { showConsentDialog, setShowConsentDialog } = useTelemetryConsent(showSetupGuide);
-  const devUnlocked = useTeamModeStore(s => s.devUnlocked)
 
-  if (spotlightMode) {
-    return (
-      <>
-        <SSEProvider />
-        <Suspense fallback={<div className="h-screen w-screen rounded-2xl overflow-hidden" />}>
-          <div className="h-screen w-screen rounded-2xl overflow-hidden">
-            <SpotlightWindow />
-          </div>
-        </Suspense>
-      </>
-    )
-  }
+  const spotlightContent = (
+    <Suspense fallback={<div className="h-screen w-screen rounded-2xl overflow-hidden" />}>
+      <div className="h-screen w-screen rounded-2xl overflow-hidden">
+        <SpotlightWindow />
+      </div>
+    </Suspense>
+  )
 
   const mainContent = (
     <>
@@ -1275,17 +1312,22 @@ function App() {
   return isTauri() ? (
     <div className="h-screen w-screen rounded-2xl overflow-hidden bg-background">
       <SSEProvider />
-      {mainContent}
-      {devUnlocked && (
-        <div className="fixed bottom-2 right-2 z-50 text-[10px] font-mono font-bold text-orange-500 bg-orange-500/10 border border-orange-500/30 px-1.5 py-0.5 rounded pointer-events-none">
-          DEV
-        </div>
-      )}
+      <div style={{ display: spotlightMode ? 'contents' : 'none' }}>
+        {spotlightContent}
+      </div>
+      <div style={{ display: spotlightMode ? 'none' : 'contents' }}>
+        {mainContent}
+      </div>
     </div>
   ) : (
     <>
       <SSEProvider />
-      {mainContent}
+      <div style={{ display: spotlightMode ? 'contents' : 'none' }}>
+        {spotlightContent}
+      </div>
+      <div style={{ display: spotlightMode ? 'none' : 'contents' }}>
+        {mainContent}
+      </div>
     </>
   )
 }

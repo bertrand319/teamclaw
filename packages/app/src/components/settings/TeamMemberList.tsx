@@ -1,5 +1,7 @@
-import { useEffect } from 'react'
-import { UserMinus, Shield, Pencil, Eye, UserPlus, Clock, UserCheck } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { useTranslation } from 'react-i18next'
+import { UserMinus, Shield, Pencil, Eye, UserPlus, Clock, UserCheck, Loader2 } from 'lucide-react'
+import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { useTeamMembersStore } from '../../stores/team-members'
 import { AddMemberInput } from './AddMemberInput'
@@ -85,6 +87,7 @@ function LocalDeviceBadge() {
 }
 
 export function TeamMemberList() {
+  const { t } = useTranslation()
   const {
     members,
     myRole,
@@ -124,6 +127,19 @@ export function TeamMemberList() {
   ])
 
   const isManager = canManageMembers()
+  const [approvingId, setApprovingId] = useState<string | null>(null)
+
+  const handleApprove = async (app: typeof applications[number]) => {
+    setApprovingId(app.nodeId)
+    try {
+      await approveApplication(app)
+      toast.success(t('settings.team.approvedNotice', { name: app.name }))
+    } catch (e) {
+      toast.error(t('settings.team.approveFailed', { error: e }))
+    } finally {
+      setApprovingId(null)
+    }
+  }
 
   const handleAdd = async (nodeId: string, name: string, role: string, label: string) => {
     await addMember({
@@ -152,7 +168,7 @@ export function TeamMemberList() {
           <div className="flex items-center gap-1.5">
             <Clock className="h-3.5 w-3.5 text-amber-500" />
             <span className="text-xs font-semibold text-amber-600 dark:text-amber-400 uppercase tracking-wide">
-              待审批 ({applications.length})
+              {t('settings.team.pendingReview')} ({applications.length})
             </span>
           </div>
           {applications.map((app) => (
@@ -164,7 +180,7 @@ export function TeamMemberList() {
                 <p className="text-sm font-medium">{app.name}</p>
                 <p className="text-xs text-muted-foreground">{app.email}</p>
                 {app.note && (
-                  <p className="text-xs text-muted-foreground mt-0.5">备注: {app.note}</p>
+                  <p className="text-xs text-muted-foreground mt-0.5">{t('settings.team.noteLabel')}: {app.note}</p>
                 )}
                 <p className="text-[10px] text-muted-foreground">
                   {app.platform} · {app.arch} · {new Date(app.appliedAt).toLocaleDateString()}
@@ -174,10 +190,15 @@ export function TeamMemberList() {
                 size="sm"
                 variant="outline"
                 className="shrink-0 text-green-600 border-green-500/30 hover:bg-green-500/10"
-                onClick={() => approveApplication(app)}
+                disabled={approvingId === app.nodeId}
+                onClick={() => handleApprove(app)}
               >
-                <UserCheck className="mr-1 h-3.5 w-3.5" />
-                通过
+                {approvingId === app.nodeId ? (
+                  <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <UserCheck className="mr-1 h-3.5 w-3.5" />
+                )}
+                {t('settings.team.approveApplication')}
               </Button>
             </div>
           ))}

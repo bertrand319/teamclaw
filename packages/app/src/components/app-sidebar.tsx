@@ -1,6 +1,6 @@
 import * as React from "react"
 import { useTranslation } from "react-i18next"
-import { Search, SquarePen, MessageSquare, Loader2, Archive, PanelLeftIcon, FolderOpen, Users, Cloud, Pencil, Ellipsis, Clock, Bookmark, Settings, Pin, Shapes, } from "lucide-react"
+import { Search, SquarePen, MessageSquare, Loader2, Archive, PanelLeftIcon, FolderOpen, Users, Cloud, Pencil, Ellipsis, Clock, Bookmark, BookOpen, Settings, Pin, Shapes, SquarePlus, GitBranch, ChevronsDownUp, X, RefreshCw } from "lucide-react"
 import { isWorkspaceUIVariant } from "@/lib/ui-variant"
 
 import { useSessionStore } from "@/stores/session"
@@ -27,7 +27,10 @@ import {
 import { cn, isTauri } from "@/lib/utils"
 import { formatRelativeTime } from "@/lib/date-format"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import { AnimatedClock } from "@/components/ui/animated-clock"
+import { DefaultBottomNav } from "@/components/navigation/DefaultBottomNav"
+import { RightPanel, ShortcutsPanel } from "@/components/panel"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -40,6 +43,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip"
 import { TrafficLights } from "@/components/ui/traffic-lights"
+import { buildSessionListActivityMap, type SessionListActivity } from "@/lib/session-list-activity"
 import {
   CommandDialog,
   CommandInput,
@@ -62,28 +66,25 @@ const WORKSPACE_QUICK_SECTIONS: {
   { id: 'rolesSkills', labelKey: 'settings.nav.rolesSkills', fallback: 'Roles & Skills', icon: Shapes, color: 'text-foreground' },
 ]
 
-// Status indicator for the active session in the sidebar
-function SidebarSessionStatusIndicator() {
-  const sessionStatus = useSessionStore(s => s.sessionStatus)
-  const pendingPermissions = useSessionStore(s => s.pendingPermissions)
-  const pendingQuestions = useSessionStore(s => s.pendingQuestions)
-  const streamingMessageId = useStreamingStore(s => s.streamingMessageId)
-
-  if (pendingPermissions.length > 0 || pendingQuestions.length > 0) {
+function SessionActivityBadge({ activity }: { activity?: SessionListActivity }) {
+  const { t } = useTranslation()
+  if (!activity) return null
+  if (activity.state === "running") {
     return (
-      <span className="shrink-0 text-[10px] font-medium text-emerald-500 bg-emerald-500/10 px-1.5 py-0.5 rounded-full">
-        等待确认
+      <Loader2
+        className="h-3.5 w-3.5 shrink-0 animate-spin text-primary"
+        aria-label={t("sidebar.sessionRunning", "Running")}
+      />
+    )
+  }
+
+  return (
+    <span className="min-w-0 shrink rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold leading-4 text-emerald-600">
+      <span className="block truncate">
+        {t("sidebar.awaitingConfirmation", "Awaiting confirmation")}
       </span>
-    )
-  }
-
-  if (sessionStatus?.type === 'busy' || sessionStatus?.type === 'retry' || streamingMessageId) {
-    return (
-      <Loader2 className="shrink-0 h-3 w-3 animate-spin text-muted-foreground/70" />
-    )
-  }
-
-  return null
+    </span>
+  )
 }
 
 // Session search dialog component
@@ -150,6 +151,8 @@ export function SidebarCollapseToggle({ className }: { className?: string }) {
       size="icon"
       className={cn("h-7 w-7 text-muted-foreground hover:text-foreground", className)}
       onClick={toggleSidebar}
+      title="Collapse sidebar"
+      aria-label="Collapse sidebar"
     >
       <PanelLeftIcon className="h-4 w-4" />
     </Button>
@@ -215,7 +218,7 @@ export function SidebarSecondarySessionActions({
         className="h-7 w-7 text-muted-foreground hover:text-foreground disabled:opacity-40"
         disabled={!hasWorkspace}
         onClick={() => includeSearchDialog && setSearchOpen(true)}
-        title={hasWorkspace ? "Search (⌘K)" : t('sidebar.selectWorkspaceFirst', 'Please select a workspace first')}
+        title={hasWorkspace ? t('sidebar.searchWithShortcut', 'Search (⌘K)') : t('sidebar.selectWorkspaceFirst', 'Please select a workspace first')}
       >
         <Search className="h-4 w-4" />
       </Button>
@@ -277,7 +280,7 @@ export function SidebarSecondarySessionActions({
                 )}
                 disabled={!hasWorkspace}
                 onClick={() => includeSearchDialog && setSearchOpen(true)}
-                title={hasWorkspace ? "Search (⌘K)" : t('sidebar.selectWorkspaceFirst', 'Please select a workspace first')}
+                title={hasWorkspace ? t('sidebar.searchWithShortcut', 'Search (⌘K)') : t('sidebar.selectWorkspaceFirst', 'Please select a workspace first')}
               >
                 <Search className="h-4 w-4" />
               </Button>
@@ -316,6 +319,183 @@ export function SidebarIconGroup({ className }: { className?: string }) {
       <SidebarCollapseToggle />
       <SidebarSecondarySessionActions />
     </div>
+  )
+}
+
+function DefaultShortcutsHeaderControls() {
+  const { t } = useTranslation()
+  const openSettings = useUIStore(s => s.openSettings)
+  const newShortcutLabel = t('shortcuts.newShortcut', 'New Shortcut')
+
+  return (
+    <div className="flex items-center gap-0.5">
+      <SidebarCollapseToggle />
+      <Button
+        variant="ghost"
+        size="icon"
+        className="h-7 w-7 text-muted-foreground hover:text-foreground"
+        onClick={() => openSettings('shortcuts')}
+        title={newShortcutLabel}
+        aria-label={newShortcutLabel}
+      >
+        <SquarePlus className="h-4 w-4" />
+      </Button>
+    </div>
+  )
+}
+
+function DefaultKnowledgeHeaderControls({
+  onSearchExpandedChange,
+  gitChangedOnly,
+  onGitChangedOnlyChange,
+}: {
+  onSearchExpandedChange: (value: boolean) => void
+  gitChangedOnly: boolean
+  onGitChangedOnlyChange: (value: boolean) => void
+}) {
+  const { t } = useTranslation()
+  const teamModeType = useTeamModeStore(s => s.teamModeType)
+  const refreshFileTree = useWorkspaceStore(s => s.refreshFileTree)
+  const collapseAll = useWorkspaceStore(s => s.collapseAll)
+  const workspacePath = useWorkspaceStore(s => s.workspacePath)
+  const [syncing, setSyncing] = React.useState(false)
+
+  const handleGitSync = React.useCallback(async () => {
+    if (!isTauri() || syncing || !workspacePath) return
+    setSyncing(true)
+    useTeamModeStore.setState({ teamGitSyncing: true })
+    try {
+      const { invoke } = await import('@tauri-apps/api/core')
+      const result = await invoke<{
+        success: boolean
+        message: string
+        needsConfirmation?: boolean
+        newFiles?: Array<{ path: string; sizeBytes: number }>
+      }>('team_sync_repo', { force: false, workspacePath })
+      if (result.needsConfirmation) {
+        const { toast } = await import('sonner')
+        toast.warning(t('settings.team.syncPrecheckToast', {
+          count: result.newFiles?.length ?? 0,
+          defaultValue: 'Detected {{count}} large new files to sync. Confirm in Settings > Team.',
+        }))
+        return
+      }
+      const { toast } = await import('sonner')
+      if (result.success) {
+        toast.success(result.message)
+        useTeamModeStore.setState({ teamGitLastSyncAt: new Date().toISOString() })
+        await refreshFileTree()
+        await useTeamModeStore.getState().loadTeamGitFileSyncStatus(workspacePath)
+      } else {
+        toast.error(result.message)
+      }
+    } catch (err) {
+      const { toast } = await import('sonner')
+      toast.error(String(err))
+    } finally {
+      setSyncing(false)
+      useTeamModeStore.setState({ teamGitSyncing: false })
+    }
+  }, [refreshFileTree, syncing, t, workspacePath])
+
+  const iconButtonClass =
+    'h-7 w-7 shrink-0 rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground'
+
+  return (
+    <div className="flex items-center gap-0.5">
+      <SidebarCollapseToggle />
+      {teamModeType === 'git' && (
+        <Button
+          variant="ghost"
+          size="icon"
+          className={iconButtonClass}
+          onClick={handleGitSync}
+          disabled={syncing}
+          title={t('knowledge.gitSync', 'Sync Team')}
+        >
+          <RefreshCw className={cn('h-4 w-4', syncing && 'animate-spin')} />
+        </Button>
+      )}
+      <Button
+        variant="ghost"
+        size="icon"
+        className={iconButtonClass}
+        onClick={() => onSearchExpandedChange(true)}
+        title={t('fileExplorer.filterPlaceholder', 'Filter files...')}
+      >
+        <Search className="h-4 w-4" />
+      </Button>
+      <Button
+        variant="ghost"
+        size="icon"
+        className={cn(iconButtonClass, gitChangedOnly && 'bg-primary/10 text-primary')}
+        onClick={() => onGitChangedOnlyChange(!gitChangedOnly)}
+        title={gitChangedOnly
+          ? t('fileExplorer.showAll', 'Show all files')
+          : t('fileExplorer.showGitChanged', 'Show git changed files only')}
+      >
+        <GitBranch className="h-4 w-4" />
+      </Button>
+      <Button
+        variant="ghost"
+        size="icon"
+        className={iconButtonClass}
+        onClick={collapseAll}
+        title={t('fileExplorer.collapseAll', 'Collapse All')}
+      >
+        <ChevronsDownUp className="h-4 w-4" />
+      </Button>
+    </div>
+  )
+}
+
+// Open the picked folder in a brand-new TeamClaw window with its own sidecar.
+function OpenInNewWindowButton() {
+  const { t } = useTranslation()
+  const [busy, setBusy] = React.useState(false)
+
+  if (!isTauri()) return null
+
+  const handleClick = async () => {
+    setBusy(true)
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog')
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: t('workspace.openInNewWindow', '在新窗口打开工作区'),
+      })
+      if (!selected || typeof selected !== 'string') return
+      const { invoke } = await import('@tauri-apps/api/core')
+      await invoke('create_workspace_window', { workspacePath: selected })
+    } catch (error) {
+      console.error('[Window] Failed to open workspace in new window:', error)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7 text-muted-foreground hover:text-foreground"
+          disabled={busy}
+          onClick={handleClick}
+        >
+          {busy ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <SquarePlus className="h-3.5 w-3.5" />
+          )}
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent side="top">
+        <p>{t('workspace.openInNewWindow', '在新窗口打开工作区')}</p>
+      </TooltipContent>
+    </Tooltip>
   )
 }
 
@@ -489,6 +669,12 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const hasMoreSessions = useSessionStore(s => s.hasMoreSessions)
   const visibleSessionCount = useSessionStore(s => s.visibleSessionCount)
   const highlightedSessionIds = useSessionStore(s => s.highlightedSessionIds)
+  const sessionStatuses = useSessionStore(s => s.sessionStatuses) || {}
+  const pendingQuestionIdsBySession = useSessionStore(s => s.pendingQuestionIdsBySession) || {}
+  const pendingQuestions = useSessionStore(s => s.pendingQuestions) || []
+  const pendingPermissions = useSessionStore(s => s.pendingPermissions) || []
+  const streamingMessageId = useStreamingStore(s => s.streamingMessageId)
+  const childSessionStreaming = useStreamingStore(s => s.childSessionStreaming)
   const archiveSession = useSessionStore(s => s.archiveSession)
   const updateSessionTitle = useSessionStore(s => s.updateSessionTitle)
   const toggleSessionPinned = useSessionStore(s => s.toggleSessionPinned)
@@ -524,10 +710,35 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
     () => sessions.filter((session) => !pinnedSessionIds.includes(session.id)),
     [sessions, pinnedSessionIds],
   )
+  const sessionActivityMap = React.useMemo(
+    () =>
+      buildSessionListActivityMap({
+        sessions: allSessions,
+        activeSessionId,
+        sessionStatuses,
+        pendingQuestionIdsBySession,
+        pendingQuestions,
+        pendingPermissions,
+        streamingMessageId,
+        streamingChildSessionIds: Object.values(childSessionStreaming)
+          .filter((state) => state?.isStreaming)
+          .map((state) => state.sessionId),
+      }),
+    [
+      activeSessionId,
+      allSessions,
+      childSessionStreaming,
+      pendingPermissions,
+      pendingQuestionIdsBySession,
+      pendingQuestions,
+      sessionStatuses,
+      streamingMessageId,
+    ],
+  )
   
-  const advancedMode = useUIStore(s => s.advancedMode)
   const openSettings = useUIStore(s => s.openSettings)
   const closeSettings = useUIStore(s => s.closeSettings)
+  const defaultNavTab = useUIStore(s => s.defaultNavTab)
   const embeddedSettingsSection = useUIStore(s => s.embeddedSettingsSection)
   const openEmbeddedSettingsSection = useUIStore(s => s.openEmbeddedSettingsSection)
   const closeEmbeddedSettingsSection = useUIStore(s => s.closeEmbeddedSettingsSection)
@@ -536,24 +747,15 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const activeWorkspacePanelTab = useWorkspaceStore(s => s.activeTab)
   const openPanel = useWorkspaceStore(s => s.openPanel)
   const closePanel = useWorkspaceStore(s => s.closePanel)
+  const [knowledgeFilterText, setKnowledgeFilterText] = React.useState('')
+  const [knowledgeSearchExpanded, setKnowledgeSearchExpanded] = React.useState(false)
+  const [knowledgeGitChangedOnly, setKnowledgeGitChangedOnly] = React.useState(false)
 
   const handleOpenEmbeddedSection = (section: EmbeddedSidebarSettingsSection) => {
     clearSelection()
     closeSettings()
     closePanel()
     useTabsStore.getState().hideAll()
-    openEmbeddedSettingsSection(section)
-  }
-
-  const handleQuickAccessEmbeddedSection = (section: EmbeddedSidebarSettingsSection) => {
-    clearSelection()
-    closeSettings()
-    useTabsStore.getState().hideAll()
-    if (embeddedSettingsSection === section) {
-      closeEmbeddedSettingsSection()
-      return
-    }
-    closePanel()
     openEmbeddedSettingsSection(section)
   }
 
@@ -569,27 +771,19 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
     }
   }
 
-  const handleOpenFilePanel = () => {
-    clearSelection()
-    closeSettings()
-    closeEmbeddedSettingsSection()
-    useTabsStore.getState().hideAll()
-    if (isPanelOpen && activeWorkspacePanelTab === 'files') {
-      closePanel()
-    } else {
-      openPanel('files')
-    }
-  }
-
   const shortcutsStripActive =
     isPanelOpen &&
     activeWorkspacePanelTab === "shortcuts" &&
     !embeddedSettingsSection
+  const defaultSidebarContent = isWorkspaceUIVariant() ? 'session' : defaultNavTab
 
-  const fileStripActive =
-    isPanelOpen &&
-    activeWorkspacePanelTab === 'files' &&
-    !embeddedSettingsSection
+  React.useEffect(() => {
+    if (defaultSidebarContent !== 'knowledge') {
+      setKnowledgeSearchExpanded(false)
+      setKnowledgeFilterText('')
+      setKnowledgeGitChangedOnly(false)
+    }
+  }, [defaultSidebarContent])
 
   const handleSelectSession = (id: string) => {
     useUIStore.getState().switchToSession(id)
@@ -633,13 +827,14 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
     const isHighlighted = highlightedSessionIds.includes(session.id)
     const isRenaming = renamingSessionId === session.id
     const isPinned = pinnedSessionIds.includes(session.id)
+    const activity = sessionActivityMap.get(session.id)
 
     return (
       <SidebarMenuItem key={session.id}>
         <SidebarMenuButton
           isActive={session.id === activeSessionId}
           className={cn(
-            "h-auto py-1.5 transition-all duration-300",
+            "h-auto py-2 pr-8 transition-all duration-300",
             isWorkspaceUIVariant() &&
               session.id === activeSessionId &&
               "relative z-0 data-[active=true]:!bg-muted/40 data-[active=true]:font-medium before:pointer-events-none before:absolute before:left-0 before:top-1/2 before:z-10 before:h-[72%] before:w-0.5 before:-translate-y-1/2 before:rounded-full before:bg-primary before:content-['']",
@@ -657,7 +852,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
             handleStartRename(e, session.id)
           }}
         >
-          <div className="flex flex-col items-start gap-0.5 flex-1 min-w-0">
+          <div className="flex flex-col items-start gap-1 flex-1 min-w-0">
             <div className="flex items-center gap-1.5 w-full">
               {isRenaming ? (
                 <SessionRenameInput
@@ -675,25 +870,21 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                   )}
                   {session.id !== activeSessionId && isHighlighted && (
                     <span className="shrink-0 text-[10px] font-medium text-emerald-500 bg-emerald-500/10 px-1.5 py-0.5 rounded-full">
-                      NEW
+                      {t('chat.newSessionBadge', 'NEW')}
                     </span>
                   )}
                 </>
               )}
             </div>
             {!isRenaming && (
-              <div className="flex items-center gap-1.5 w-full">
-                <span className="text-[10px] text-muted-foreground">
+              <div className="flex min-w-0 items-center gap-2 w-full">
+                <span className="shrink-0 text-[10px] text-muted-foreground">
                   {formatDate(session.updatedAt)}
                   {session.messageCount !== undefined && (
-                    <> · {session.messageCount} messages</>
+                    <> · {t('chat.messageCountShort', { count: session.messageCount })}</>
                   )}
                 </span>
-                {session.id === activeSessionId && (
-                  <span className="ml-auto">
-                    <SidebarSessionStatusIndicator />
-                  </span>
-                )}
+                <SessionActivityBadge activity={activity} />
               </div>
             )}
           </div>
@@ -703,7 +894,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
             <Button
               variant="ghost"
               size="icon"
-              className="absolute right-1 bottom-1 h-5 w-5 opacity-0 group-hover/menu-item:opacity-100 data-[state=open]:opacity-100 transition-opacity hover:bg-black/10 dark:hover:bg-white/10 rounded-md"
+              className="absolute right-1 top-1/2 h-6 w-6 -translate-y-1/2 opacity-0 group-hover/menu-item:opacity-100 data-[state=open]:opacity-100 transition-opacity hover:bg-black/10 dark:hover:bg-white/10 rounded-md"
               onClick={(e) => e.stopPropagation()}
             >
               <Ellipsis className="h-3 w-3" />
@@ -740,16 +931,85 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
     <Sidebar variant="sidebar" {...props}>
       <div className="flex h-full flex-col" data-onboarding-id="main-sidebar">
         {/* Header: custom traffic lights (Tauri) or spacer + icon group */}
-        <SidebarHeader 
-          className="flex-row items-center px-2 pt-1 pb-2"
+        <SidebarHeader
+          className="flex-row items-center h-12 shrink-0 px-2 pt-0 pb-0"
           data-tauri-drag-region
         >
           <TrafficLights />
           {/* Flexible drag region */}
           <div className="flex-1" data-tauri-drag-region />
-          {/* Icon group: workspace shell keeps only collapse in the header */}
-          {isWorkspaceUIVariant() ? <SidebarCollapseToggle /> : <SidebarIconGroup />}
+          {isWorkspaceUIVariant() ? (
+            <>
+              <SidebarCollapseToggle />
+              <button
+                type="button"
+                className={cn(
+                  "flex h-7 items-center gap-1.5 rounded text-xs transition-colors",
+                  isPanelOpen && activeWorkspacePanelTab === "knowledge"
+                    ? "bg-muted px-2 text-foreground"
+                    : "w-7 justify-center text-muted-foreground hover:bg-muted hover:text-foreground",
+                )}
+                onClick={() =>
+                  isPanelOpen && activeWorkspacePanelTab === "knowledge"
+                    ? closePanel()
+                    : openPanel("knowledge")
+                }
+                title={t("navigation.knowledge", "Knowledge")}
+                aria-label={t("navigation.knowledge", "Knowledge")}
+              >
+                <BookOpen className="h-4 w-4" />
+                {isPanelOpen && activeWorkspacePanelTab === "knowledge" && (
+                  <span>{t("navigation.knowledge", "Knowledge")}</span>
+                )}
+              </button>
+            </>
+          ) : defaultSidebarContent === 'knowledge' ? (
+            <DefaultKnowledgeHeaderControls
+              onSearchExpandedChange={setKnowledgeSearchExpanded}
+              gitChangedOnly={knowledgeGitChangedOnly}
+              onGitChangedOnlyChange={setKnowledgeGitChangedOnly}
+            />
+          ) : defaultSidebarContent === 'shortcuts' ? (
+            <DefaultShortcutsHeaderControls />
+          ) : (
+            <SidebarIconGroup />
+          )}
         </SidebarHeader>
+
+        {!isWorkspaceUIVariant() && defaultSidebarContent === 'knowledge' && knowledgeSearchExpanded && (
+          <div className="px-2 pb-1">
+            <div className="flex items-center gap-1 rounded-lg border border-border/50 bg-muted/20 px-1.5 py-1">
+              <div className="relative min-w-0 flex-1">
+                <Search className="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground/80" />
+                <Input
+                  autoFocus
+                  value={knowledgeFilterText}
+                  onChange={(e) => setKnowledgeFilterText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape') {
+                      setKnowledgeSearchExpanded(false)
+                      setKnowledgeFilterText('')
+                    }
+                  }}
+                  placeholder={t('fileExplorer.filterPlaceholder', 'Filter files...')}
+                  className="h-7 border-0 bg-transparent pl-6.5 pr-1 text-xs shadow-none focus-visible:ring-0"
+                />
+              </div>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-6 w-6 shrink-0 rounded-md text-muted-foreground/80 transition-colors hover:bg-muted hover:text-foreground"
+                onClick={() => {
+                  setKnowledgeSearchExpanded(false)
+                  setKnowledgeFilterText('')
+                }}
+                title={t('common.close', 'Close')}
+              >
+                <X className="h-3.5 w-3.5" />
+              </Button>
+            </div>
+          </div>
+        )}
 
         <SidebarContent>
           {isWorkspaceUIVariant() && (
@@ -801,179 +1061,131 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
           </div>
           )}
           <SidebarGroup
-            className={cn(isWorkspaceUIVariant() && "!px-1 !pb-2 !pt-1")}
+            className={cn(
+              "min-h-0 flex-1",
+              isWorkspaceUIVariant() ? "!px-1 !pb-2 !pt-1" : "!px-0 !pb-0 !pt-0",
+            )}
           >
-          {isWorkspaceUIVariant() && (
-            <div className="flex w-full shrink-0 flex-col pb-3 pt-0.5">
-              <SidebarSecondarySessionActions
-                newChatVariant="sidebarWide"
-                includeSearchDialog={sidebarDisplayState !== 'collapsed'}
-              />
-            </div>
-          )}
-          <SidebarMenu>
-            {isLoading && sessions.length === 0 ? (
-              <div className="flex items-center justify-center py-8">
-                <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+            {isWorkspaceUIVariant() && (
+              <div className="flex w-full shrink-0 flex-col pb-3 pt-0.5">
+                <SidebarSecondarySessionActions
+                  newChatVariant="sidebarWide"
+                  includeSearchDialog={sidebarDisplayState !== 'collapsed'}
+                />
               </div>
-            ) : sessions.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-8 text-center">
-                <MessageSquare className="h-8 w-8 text-muted-foreground mb-2" />
-                <p className="text-sm text-muted-foreground">
-                  {t('sidebar.noConversations', 'No conversations')}
-                </p>
-                <p className="text-xs text-muted-foreground mt-1">
-                  {t('sidebar.clickToStartChat', 'Click the edit icon to start a new chat')}
-                </p>
-              </div>
-            ) : (
+            )}
+
+            {defaultSidebarContent === 'session' && (
               <>
-                {pinnedSessions.length > 0 && (
-                  <>
-                    <div className="px-2 pb-1 pt-0.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground/80">
-                      {t('sidebar.pinnedSessions', 'Pinned')}
+                <SidebarMenu>
+                  {isLoading && sessions.length === 0 ? (
+                    <div className="flex items-center justify-center py-8">
+                      <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
                     </div>
-                    {pinnedSessions.map(renderSessionItem)}
-                  </>
-                )}
-                {unpinnedSessions.length > 0 && (
-                  <>
-                    {pinnedSessions.length > 0 && (
-                      <div className="px-2 pb-1 pt-3 text-[11px] font-medium uppercase tracking-wide text-muted-foreground/80">
-                        {t('sidebar.allSessions', 'All sessions')}
-                      </div>
-                    )}
-                    {unpinnedSessions.map(renderSessionItem)}
-                  </>
+                  ) : sessions.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center py-8 text-center">
+                      <MessageSquare className="h-8 w-8 text-muted-foreground mb-2" />
+                      <p className="text-sm text-muted-foreground">
+                        {t('sidebar.noConversations', 'No conversations')}
+                      </p>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        {t('sidebar.clickToStartChat', 'Click the edit icon to start a new chat')}
+                      </p>
+                    </div>
+                  ) : (
+                    <>
+                      {pinnedSessions.length > 0 && (
+                        <>
+                          <div className="px-2 pb-1 pt-0.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground/80">
+                            {t('sidebar.pinnedSessions', 'Pinned')}
+                          </div>
+                          {pinnedSessions.map(renderSessionItem)}
+                        </>
+                      )}
+                      {unpinnedSessions.length > 0 && (
+                        <>
+                          {pinnedSessions.length > 0 && (
+                            <div className="px-2 pb-1 pt-3 text-[11px] font-medium uppercase tracking-wide text-muted-foreground/80">
+                              {t('sidebar.allSessions', 'All sessions')}
+                            </div>
+                          )}
+                          {unpinnedSessions.map(renderSessionItem)}
+                        </>
+                      )}
+                    </>
+                  )}
+                </SidebarMenu>
+
+                {hasMoreSessions && sessions.length > 0 && (
+                  <div className="px-2 py-2">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="w-full"
+                      onClick={() => loadMoreSessions()}
+                      disabled={isLoadingMore}
+                    >
+                      {isLoadingMore ? (
+                        <>
+                          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                          {t('sidebar.loadingMore', 'Loading...')}
+                        </>
+                      ) : (
+                        t('sidebar.loadMore', 'Load More')
+                      )}
+                    </Button>
+                  </div>
                 )}
               </>
             )}
-          </SidebarMenu>
-          
-          {/* Load More button */}
-          {hasMoreSessions && sessions.length > 0 && (
-            <div className="px-2 py-2">
-              <Button
-                variant="ghost"
-                size="sm"
-                className="w-full"
-                onClick={() => loadMoreSessions()}
-                disabled={isLoadingMore}
-              >
-                {isLoadingMore ? (
-                  <>
-                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                    {t('sidebar.loadingMore', 'Loading...')}
-                  </>
-                ) : (
-                  t('sidebar.loadMore', 'Load More')
-                )}
-              </Button>
-            </div>
-          )}
+
+            {defaultSidebarContent === 'knowledge' && (
+              <div className="min-h-0 flex-1 overflow-hidden">
+                <RightPanel
+                  defaultTab="knowledge"
+                  knowledgeBrowserProps={{
+                    hidePanelToolbar: true,
+                    filterText: knowledgeFilterText,
+                    onFilterTextChange: setKnowledgeFilterText,
+                    gitChangedOnly: knowledgeGitChangedOnly,
+                    onGitChangedOnlyChange: setKnowledgeGitChangedOnly,
+                    searchExpanded: knowledgeSearchExpanded,
+                    onSearchExpandedChange: setKnowledgeSearchExpanded,
+                  }}
+                />
+              </div>
+            )}
+
+            {defaultSidebarContent === 'shortcuts' && (
+              <div className="min-h-0 flex-1 overflow-hidden">
+                <ShortcutsPanel />
+              </div>
+            )}
           </SidebarGroup>
 
         </SidebarContent>
 
-        <SidebarFooter className="gap-1 px-3 pb-3 pt-1.5">
-          {/* Quick Access — default mode only */}
-          {!isWorkspaceUIVariant() && (
-            <div className="flex flex-col gap-0.5">
+        <SidebarFooter className="gap-1 px-2 pb-1 pt-1">
+          {!isWorkspaceUIVariant() && <DefaultBottomNav />}
+
+          {isWorkspaceUIVariant() && (
+            <div className="flex items-center justify-between">
               <Button
                 variant="ghost"
                 size="sm"
-                className={cn(
-                  'h-7 justify-start gap-1.5 px-2 font-normal',
-                  shortcutsStripActive && 'bg-primary/10 text-primary font-medium',
-                )}
-                onClick={handleWorkspaceShortcutsPanel}
+                className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground gap-1.5"
+                onClick={() => openSettings()}
               >
-                <Bookmark
-                  className={cn(
-                    'h-3.5 w-3.5 shrink-0',
-                    shortcutsStripActive ? 'text-amber-500' : 'text-muted-foreground',
-                  )}
-                />
-                <span className="truncate text-xs">
-                  {t('navigation.shortcuts', 'Shortcuts')}
-                </span>
+                <Settings className="h-3.5 w-3.5 shrink-0" />
+                {t('common.settings', 'Settings')}
               </Button>
-
-              <Button
-                variant="ghost"
-                size="sm"
-                className={cn(
-                  'h-7 justify-start gap-1.5 px-2 font-normal',
-                  embeddedSettingsSection === 'automation' && 'bg-primary/10 text-primary font-medium',
-                )}
-                onClick={() => handleQuickAccessEmbeddedSection('automation')}
-              >
-                <Clock
-                  className={cn(
-                    'h-3.5 w-3.5 shrink-0',
-                    embeddedSettingsSection === 'automation' ? 'text-amber-500' : 'text-muted-foreground',
-                  )}
-                />
-                <span className="truncate text-xs">
-                  {t('settings.nav.automation', 'Automation')}
-                </span>
-              </Button>
-
-              <Button
-                variant="ghost"
-                size="sm"
-                className={cn(
-                  'h-7 justify-start gap-1.5 px-2 font-normal',
-                  embeddedSettingsSection === 'rolesSkills' && 'bg-primary/10 text-primary font-medium',
-                )}
-                onClick={() => handleQuickAccessEmbeddedSection('rolesSkills')}
-              >
-                <Shapes
-                  className={cn(
-                    'h-3.5 w-3.5 shrink-0',
-                    embeddedSettingsSection === 'rolesSkills' ? 'text-foreground' : 'text-muted-foreground',
-                  )}
-                />
-                <span className="truncate text-xs">
-                  {t('settings.nav.rolesSkills', 'Roles & Skills')}
-                </span>
-              </Button>
-
-              {advancedMode && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className={cn(
-                    'h-7 justify-start gap-1.5 px-2 font-normal',
-                    fileStripActive && 'bg-primary/10 text-primary font-medium',
-                  )}
-                  onClick={handleOpenFilePanel}
-                >
-                  <FolderOpen
-                    className={cn(
-                      'h-3.5 w-3.5 shrink-0',
-                      fileStripActive ? 'text-blue-500' : 'text-muted-foreground',
-                    )}
-                  />
-                  <span className="truncate text-xs">
-                    {t('navigation.files', 'Files')}
-                  </span>
-                </Button>
-              )}
+              <div className="flex items-center gap-0.5">
+                <WorkspaceSelectorButton />
+                <OpenInNewWindowButton />
+              </div>
             </div>
           )}
-          <div className="flex items-center justify-between">
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground gap-1.5"
-              onClick={() => openSettings()}
-            >
-              <Settings className="h-3.5 w-3.5 shrink-0" />
-              {t('sidebar.settings', '设置')}
-            </Button>
-            <WorkspaceSelectorButton />
-          </div>
+
         </SidebarFooter>
       </div>
     </Sidebar>

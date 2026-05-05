@@ -22,6 +22,7 @@ import { useDepsStore, getSetupDecision, markSetupCompleted } from "@/stores/dep
 import { useTelemetryStore } from "@/stores/telemetry";
 import { useTeamModeStore } from "@/stores/team-mode";
 import { useTeamOssStore } from "@/stores/team-oss";
+import { useTeamMembersStore } from "@/stores/team-members";
 import { useShortcutsStore } from "@/stores/shortcuts";
 import { useCronStore } from "@/stores/cron";
 import { initOpenCodeClient } from "@/lib/opencode/sdk-client";
@@ -31,13 +32,30 @@ import {
   waitForOpenCodeBootstrapped,
 } from "@/lib/opencode/preloader";
 import { getSkillDirectories, loadAllSkills } from "@/lib/git/skill-loader";
-import { appShortName } from "@/lib/build-config";
+import { appShortName, TEAMCLAW_DIR, TEAM_REPO_DIR } from "@/lib/build-config";
 
 export const SKILLS_CHANGED_EVENT = "skills-files-changed";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // OpenCode server start / workspace restore
 // ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Parse `?workspace=&port=` from window.location for secondary windows opened
+ * via `create_workspace_window`. Returns null in the main window.
+ */
+function readWindowParams(): { workspace: string; port: number } | null {
+  if (typeof window === "undefined" || !window.location?.search) return null;
+  const params = new URLSearchParams(window.location.search);
+  const workspace = params.get("workspace");
+  const portStr = params.get("port");
+  if (!workspace || !portStr) return null;
+  const port = Number.parseInt(portStr, 10);
+  if (!Number.isFinite(port) || port <= 0) return null;
+  return { workspace, port };
+}
+
+const windowParams = readWindowParams();
 
 export function useOpenCodeInit() {
   const workspacePath = useWorkspaceStore((s) => s.workspacePath);
@@ -47,36 +65,46 @@ export function useOpenCodeInit() {
   const [openCodeError, setOpenCodeError] = useState<string | null>(null);
   const [initialWorkspaceResolved, setInitialWorkspaceResolved] = useState(false);
 
-  // Auto-restore last workspace on launch (runs once on mount)
+  // Auto-restore last workspace on launch (runs once on mount).
+  // Secondary windows opened via create_workspace_window skip the localStorage
+  // path and use the URL-provided workspace so they don't clobber main's saved value.
   useEffect(() => {
     let cancelled = false;
 
     void (async () => {
       if (!workspacePath) {
-        try {
-          const savedPath = localStorage.getItem(`${appShortName}-workspace-path`);
-          if (savedPath) {
-            let canRestore = true;
+        if (windowParams) {
+          console.log(
+            "[App] Secondary window detected; using URL workspace:",
+            windowParams.workspace,
+          );
+          await setWorkspace(windowParams.workspace);
+        } else {
+          try {
+            const savedPath = localStorage.getItem(`${appShortName}-workspace-path`);
+            if (savedPath) {
+              let canRestore = true;
 
-            if (isTauri()) {
-              try {
-                const { exists } = await import("@tauri-apps/plugin-fs");
-                canRestore = await exists(savedPath);
-              } catch (error) {
-                console.warn("[App] Failed to validate saved workspace:", error);
+              if (isTauri()) {
+                try {
+                  const { exists } = await import("@tauri-apps/plugin-fs");
+                  canRestore = await exists(savedPath);
+                } catch (error) {
+                  console.warn("[App] Failed to validate saved workspace:", error);
+                }
+              }
+
+              if (canRestore) {
+                console.log("[App] Restoring workspace from last session:", savedPath);
+                await setWorkspace(savedPath);
+              } else {
+                console.log("[App] Saved workspace no longer exists, clearing restore path:", savedPath);
+                localStorage.removeItem(`${appShortName}-workspace-path`);
               }
             }
-
-            if (canRestore) {
-              console.log("[App] Restoring workspace from last session:", savedPath);
-              await setWorkspace(savedPath);
-            } else {
-              console.log("[App] Saved workspace no longer exists, clearing restore path:", savedPath);
-              localStorage.removeItem(`${appShortName}-workspace-path`);
-            }
+          } catch {
+            /* ignore storage errors */
           }
-        } catch {
-          /* ignore storage errors */
         }
       }
 
@@ -126,7 +154,10 @@ export function useOpenCodeInit() {
         : "[OpenCode] Starting server for:",
       workspacePath,
     );
-    waitForOpenCodeBootstrapped(workspacePath)
+    const explicitPort =
+      windowParams && windowParams.workspace === workspacePath ? windowParams.port : undefined;
+
+    waitForOpenCodeBootstrapped(workspacePath, explicitPort)
       .then((status) => {
         if (cancelled) return;
         console.log("[OpenCode] Server bootstrapped:", status);
@@ -138,7 +169,7 @@ export function useOpenCodeInit() {
         if (cancelled) return;
         console.warn("[OpenCode] Failed waiting for bootstrap event:", error);
       });
-    startOpenCode(workspacePath)
+    startOpenCode(workspacePath, explicitPort)
       .then((status) => {
         if (cancelled) return;
         console.log("[OpenCode] Server started:", status);
@@ -374,24 +405,29 @@ export function useGitReposInit() {
   const workspacePath = useWorkspaceStore((s) => s.workspacePath);
   const openCodeReady = useWorkspaceStore((s) => s.openCodeReady);
   const { initialize: initGitRepos, syncAll: syncGitRepos } = useGitReposStore();
-  const hasGitSynced = useRef(false);
+  const prevWorkspaceRef = useRef<string | null>(null);
   const teamSyncIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Local git repos init — runs immediately when workspace is set
+  // Local git repos init — re-runs when workspace changes
   useEffect(() => {
-    if (workspacePath && !hasGitSynced.current) {
-      hasGitSynced.current = true;
+    if (!workspacePath) return;
 
-      initGitRepos()
-        .then(() => {
-          syncGitRepos().catch((err: unknown) => {
-            console.warn("[App] Git auto-sync failed (non-critical):", err);
-          });
-        })
-        .catch((err: unknown) => {
-          console.warn("[App] Git repos init failed (non-critical):", err);
-        });
+    const isWorkspaceChange = prevWorkspaceRef.current !== null && prevWorkspaceRef.current !== workspacePath;
+    prevWorkspaceRef.current = workspacePath;
+
+    if (isWorkspaceChange) {
+      useGitReposStore.getState().reset();
     }
+
+    initGitRepos()
+      .then(() => {
+        syncGitRepos().catch((err: unknown) => {
+          console.warn("[App] Git auto-sync failed (non-critical):", err);
+        });
+      })
+      .catch((err: unknown) => {
+        console.warn("[App] Git repos init failed (non-critical):", err);
+      });
   }, [workspacePath, initGitRepos, syncGitRepos]);
 
   // Team sync — deferred until sidecar is ready to avoid I/O contention
@@ -400,15 +436,37 @@ export function useGitReposInit() {
 
     import("@tauri-apps/api/core")
       .then(({ invoke }) => {
-        invoke("get_team_config")
+        invoke("get_team_config", { workspacePath })
           .then((config: unknown) => {
             const teamConfig = config as { enabled?: boolean } | null;
             if (teamConfig?.enabled) {
               const doSync = () => {
-                invoke("team_sync_repo")
-                  .then((result: unknown) => {
-                    const r = result as { success: boolean; message: string };
+                invoke("team_sync_repo", { force: false, workspacePath })
+                  .then(async (result: unknown) => {
+                    const r = result as {
+                      success: boolean;
+                      message: string;
+                      needsConfirmation?: boolean;
+                      newFiles?: Array<{ path: string; sizeBytes: number }>;
+                      totalBytes?: number;
+                    };
+                    if (r.needsConfirmation) {
+                      console.warn(
+                        "[App] Team sync blocked by precheck — waiting for user confirmation in Settings",
+                        { count: r.newFiles?.length ?? 0, totalBytes: r.totalBytes ?? 0 },
+                      );
+                      const { toast } = await import("sonner");
+                      toast.warning(
+                        `检测到 ${r.newFiles?.length ?? 0} 个较大的新文件待同步，请在设置 → 团队中确认`,
+                      );
+                      return;
+                    }
                     if (r.success) {
+                      const { useTeamModeStore } = await import("@/stores/team-mode");
+                      useTeamModeStore.setState({ teamGitLastSyncAt: new Date().toISOString() });
+                      if (useTeamModeStore.getState().teamModeType === "git") {
+                        useTeamModeStore.getState().loadTeamGitFileSyncStatus(workspacePath);
+                      }
                       console.log("[App] Team repo sync completed (MCP configs updated)");
                     } else {
                       console.warn("[App] Team repo sync skipped:", r.message);
@@ -450,6 +508,20 @@ export function useGitReposInit() {
         console.warn("[App] Failed to load team shortcuts (non-critical):", err);
       });
 
+    void (async () => {
+      try {
+        await useTeamMembersStore.getState().loadCurrentNodeId();
+      } catch (err: unknown) {
+        console.warn("[App] Failed to load current team member identity (non-critical):", err);
+      }
+
+      try {
+        await useTeamMembersStore.getState().loadMembers();
+      } catch (err: unknown) {
+        console.warn("[App] Failed to load team members for shortcut roles (non-critical):", err);
+      }
+    })();
+
     return () => {
       if (teamSyncIntervalRef.current) {
         clearInterval(teamSyncIntervalRef.current);
@@ -457,6 +529,80 @@ export function useGitReposInit() {
       }
     };
   }, [workspacePath, openCodeReady]);
+
+  // Real-time: refresh team-git file status and member roles when team files change
+  useEffect(() => {
+    if (!workspacePath || !isTauri()) return;
+    let unlistenFileChange: (() => void) | undefined;
+    let unlistenMembersChanged: (() => void) | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let cancelled = false;
+
+    const normalizePath = (value: string) => value.replace(/\\/g, "/").replace(/\/$/, "");
+    const teamDirPrefix = `${workspacePath}/${TEAM_REPO_DIR}/`;
+    const memberManifestPaths = new Set([
+      `${workspacePath}/${TEAM_REPO_DIR}/_meta/members.json`,
+      `${workspacePath}/${TEAM_REPO_DIR}/_team/members.json`,
+      `${workspacePath}/${TEAMCLAW_DIR}/_team/members.json`,
+    ].map(normalizePath));
+
+    const refreshCurrentMemberShortcutRoles = async () => {
+      try {
+        await useTeamMembersStore.getState().loadCurrentNodeId();
+      } catch (err: unknown) {
+        console.warn("[App] Failed to refresh current team member identity (non-critical):", err);
+      }
+
+      try {
+        await useTeamMembersStore.getState().loadMembers();
+      } catch (err: unknown) {
+        console.warn("[App] Failed to refresh team members for shortcut roles (non-critical):", err);
+      }
+    };
+
+    import("@tauri-apps/api/event").then(({ listen }) => {
+      if (cancelled) return;
+      listen<{ path: string; kind: string }>("file-change", (event) => {
+        const path = normalizePath(event.payload.path);
+        if (memberManifestPaths.has(path)) {
+          void refreshCurrentMemberShortcutRoles();
+        }
+
+        if (!path.startsWith(teamDirPrefix)) return;
+        // Skip churn inside .git/
+        if (path.includes(`/${TEAM_REPO_DIR}/.git/`)) return;
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(async () => {
+          const { useTeamModeStore } = await import("@/stores/team-mode");
+          if (useTeamModeStore.getState().teamModeType !== "git") return;
+          useTeamModeStore.getState().loadTeamGitFileSyncStatus(workspacePath);
+        }, 500);
+      }).then((fn) => {
+        if (cancelled) {
+          fn();
+          return;
+        }
+        unlistenFileChange = fn;
+      });
+
+      listen("team:members-changed", () => {
+        void refreshCurrentMemberShortcutRoles();
+      }).then((fn) => {
+        if (cancelled) {
+          fn();
+          return;
+        }
+        unlistenMembersChanged = fn;
+      });
+    });
+
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+      unlistenFileChange?.();
+      unlistenMembersChanged?.();
+    };
+  }, [workspacePath]);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -471,9 +617,12 @@ export function useP2pAutoReconnect() {
   const workspacePath = useWorkspaceStore((s) => s.workspacePath);
   const openCodeReady = useWorkspaceStore((s) => s.openCodeReady);
   const teamMode = useTeamModeStore((s) => s.teamMode);
+  const teamModeType = useTeamModeStore((s) => s.teamModeType);
 
   useEffect(() => {
+    // Only auto-reconnect for P2P teams, not S3/OSS/Git
     if (!workspacePath || !openCodeReady || !teamMode || !isTauri()) return;
+    if (teamModeType && teamModeType !== 'p2p') return;
 
     let cancelled = false;
     const MAX_RETRIES = 5;
@@ -519,7 +668,7 @@ export function useP2pAutoReconnect() {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [workspacePath, openCodeReady, teamMode]);
+  }, [workspacePath, openCodeReady, teamMode, teamModeType]);
 }
 
 export function useCronInit() {

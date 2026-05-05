@@ -22,18 +22,31 @@ import {
 import {
   useStreamingStore,
 } from "@/stores/streaming";
+import { useLocalStatsStore } from "@/stores/local-stats";
+import { useWorkspaceStore } from "@/stores/workspace";
 import { sessionDataCache } from "./session-data-cache";
 import {
-  buildTerminalInputQuestion,
-  extractTerminalPromptSnippet,
-  getCommandText,
-  getTerminalPromptKind,
-  getToolCallOutputText,
-  isLikelyTerminalPromptText,
-} from "@/lib/terminal-interaction";
+  addPendingQuestionActivity,
+  pendingQuestionActivityKey,
+  removePendingQuestionActivity,
+  resolveSessionActivityOwner,
+} from "@/lib/session-list-activity";
 
 type SessionSet = (fn: ((state: SessionState) => Partial<SessionState>) | Partial<SessionState>) => void;
 type SessionGet = () => SessionState;
+
+// Tracks toolCallIds already counted for skill telemetry so a single invocation
+// is counted exactly once, even though handleToolExecuting fires multiple times
+// (status: running → completed, and the first event often has empty args).
+const countedSkillToolCalls = new Set<string>();
+
+// Cap the set so it can't grow unbounded in a long-lived session.
+function markSkillCounted(toolCallId: string) {
+  if (countedSkillToolCalls.size > 10_000) {
+    countedSkillToolCalls.clear();
+  }
+  countedSkillToolCalls.add(toolCallId);
+}
 
 export function createToolHandlers(set: SessionSet, get: SessionGet) {
   return {
@@ -64,86 +77,12 @@ export function createToolHandlers(set: SessionSet, get: SessionGet) {
       const isQuestionTool = event.toolName.toLowerCase() === "question";
       const isRunning = event.status === "running";
       const toolNameLower = event.toolName.toLowerCase();
-      const isCommandTool =
-        toolNameLower.includes("bash") ||
-        toolNameLower.includes("shell") ||
-        toolNameLower.includes("terminal") ||
-        toolNameLower.includes("run_command");
-      const commandText = getCommandText(event.arguments);
-      const outputText = getToolCallOutputText(event.result);
-      const needsTerminalInput =
-        isCommandTool &&
-        isRunning &&
-        isLikelyTerminalPromptText(outputText);
 
       let questions: Question[] | undefined;
       if (isQuestionTool && event.arguments) {
         const args = event.arguments as unknown as QuestionToolInput;
         if (args.questions && Array.isArray(args.questions)) {
           questions = args.questions;
-        }
-      }
-
-      if (needsTerminalInput) {
-        const promptSnippet = extractTerminalPromptSnippet(outputText);
-        questions = [buildTerminalInputQuestion(commandText, outputText)];
-
-        const questionData = {
-          questionId: `terminal-input:${event.toolCallId}`,
-          toolCallId: event.toolCallId,
-          messageId: streamingMessageId,
-          questions,
-          sessionId: event.sessionId ?? activeSessionId ?? undefined,
-          source: "terminal_input" as const,
-          terminalInputContext: {
-            command: commandText,
-            prompt: promptSnippet,
-            kind: getTerminalPromptKind(promptSnippet),
-          },
-        };
-
-        const existingQuestions = get().pendingQuestions;
-        const existingForTool = existingQuestions.find((q) => q.toolCallId === event.toolCallId);
-        if (
-          !existingForTool ||
-          existingForTool.source !== "opencode"
-        ) {
-          set((state) => ({
-            pendingQuestions: [
-              ...state.pendingQuestions.filter((q) => q.toolCallId !== event.toolCallId),
-              questionData,
-            ].slice(-20),
-          }));
-          if (activeSessionId) {
-            const cached = sessionDataCache.get(activeSessionId) || { todos: [], diff: [] };
-            const cacheQuestions = cached.pendingQuestions || [];
-            sessionDataCache.set(activeSessionId, {
-              ...cached,
-              pendingQuestions: [
-                ...cacheQuestions.filter((q) => q.toolCallId !== event.toolCallId),
-                questionData,
-              ],
-            });
-          }
-        }
-      } else if (
-        get().pendingQuestions.some(
-          (q) => q.source === "terminal_input" && q.toolCallId === event.toolCallId,
-        ) &&
-        event.status !== "running"
-      ) {
-        set((state) => ({
-          pendingQuestions: state.pendingQuestions.filter((q) => q.toolCallId !== event.toolCallId),
-        }));
-        if (activeSessionId) {
-          const cached = sessionDataCache.get(activeSessionId);
-          if (cached) {
-            const cacheQs = cached.pendingQuestions || [];
-            sessionDataCache.set(activeSessionId, {
-              ...cached,
-              pendingQuestions: cacheQs.filter((q) => q.toolCallId !== event.toolCallId),
-            });
-          }
         }
       }
 
@@ -161,17 +100,33 @@ export function createToolHandlers(set: SessionSet, get: SessionGet) {
             questions,
             sessionId: event.sessionId ?? activeSessionId ?? undefined,
           };
+          const ownerSessionId = resolveSessionActivityOwner(
+            questionData.sessionId,
+            get().sessions,
+            activeSessionId,
+          );
           set((state) => ({
-            pendingQuestions: [
-              ...state.pendingQuestions.filter((q) => q.toolCallId !== event.toolCallId),
-              questionData,
-            ].slice(-20),
+            pendingQuestions:
+              ownerSessionId === state.activeSessionId
+                ? [
+                    ...state.pendingQuestions.filter((q) => q.toolCallId !== event.toolCallId),
+                    questionData,
+                  ].slice(-20)
+                : state.pendingQuestions,
+            pendingQuestionIdsBySession: addPendingQuestionActivity(
+              state.pendingQuestionIdsBySession || {},
+              questionData.sessionId,
+              pendingQuestionActivityKey(questionData),
+            ),
           }));
           // Also save to cache so it survives session switching
-          if (activeSessionId) {
-            const cached = sessionDataCache.get(activeSessionId) || { todos: [], diff: [] };
+          const cacheSessionIds = Array.from(
+            new Set([questionData.sessionId, ownerSessionId].filter(Boolean) as string[]),
+          );
+          for (const cacheSessionId of cacheSessionIds) {
+            const cached = sessionDataCache.get(cacheSessionId) || { todos: [], diff: [] };
             const cacheQuestions = cached.pendingQuestions || [];
-            sessionDataCache.set(activeSessionId, {
+            sessionDataCache.set(cacheSessionId, {
               ...cached,
               pendingQuestions: [
                 ...cacheQuestions.filter((q) => q.toolCallId !== event.toolCallId),
@@ -185,13 +140,26 @@ export function createToolHandlers(set: SessionSet, get: SessionGet) {
       if (isQuestionTool && event.status === "completed") {
         set((state) => ({
           pendingQuestions: state.pendingQuestions.filter((q) => q.toolCallId !== event.toolCallId),
+          pendingQuestionIdsBySession: removePendingQuestionActivity(
+            state.pendingQuestionIdsBySession || {},
+            event.sessionId ?? activeSessionId,
+            event.toolCallId,
+          ),
         }));
         // Also clear from cache
-        if (activeSessionId) {
-          const cached = sessionDataCache.get(activeSessionId);
+        const ownerSessionId = resolveSessionActivityOwner(
+          event.sessionId ?? activeSessionId,
+          get().sessions,
+          activeSessionId,
+        );
+        const cacheSessionIds = Array.from(
+          new Set([event.sessionId ?? activeSessionId, ownerSessionId].filter(Boolean) as string[]),
+        );
+        for (const cacheSessionId of cacheSessionIds) {
+          const cached = sessionDataCache.get(cacheSessionId);
           if (cached) {
             const cacheQsComplete = cached.pendingQuestions || [];
-            sessionDataCache.set(activeSessionId, {
+            sessionDataCache.set(cacheSessionId, {
               ...cached,
               pendingQuestions: cacheQsComplete.filter((q) => q.toolCallId !== event.toolCallId),
             });
@@ -215,9 +183,7 @@ export function createToolHandlers(set: SessionSet, get: SessionGet) {
         );
 
         if (existingTool) {
-          const newStatus = needsTerminalInput
-            ? "waiting"
-            : mapStatus(event.status);
+          const newStatus = mapStatus(event.status);
           updatedMessage = {
             ...m,
             toolCalls: m.toolCalls?.map((tc) =>
@@ -251,7 +217,7 @@ export function createToolHandlers(set: SessionSet, get: SessionGet) {
           const newToolCall: ToolCall = {
             id: event.toolCallId,
             name: event.toolName,
-            status: needsTerminalInput ? "waiting" : mapStatus(event.status),
+            status: mapStatus(event.status),
             arguments: event.arguments || {},
             result: event.result,
             duration: event.duration,
@@ -290,28 +256,31 @@ export function createToolHandlers(set: SessionSet, get: SessionGet) {
           ),
         };
       });
-    },
 
-    forceCompleteToolCall: (toolCallId: string) => {
-      set((state) => ({
-        sessions: state.sessions.map((s) => ({
-          ...s,
-          messages: s.messages.map((m) => ({
-            ...m,
-            toolCalls: m.toolCalls?.map((tc) =>
-              tc.id === toolCallId && tc.status === "calling"
-                ? {
-                    ...tc,
-                    status: "completed" as const,
-                    duration: tc.startTime
-                      ? Date.now() - tc.startTime.getTime()
-                      : tc.duration,
-                  }
-                : tc,
-            ),
-          })),
-        })),
-      }));
+      // Skill usage telemetry — fire-and-forget, never blocks streaming.
+      // handleToolExecuting fires multiple times per tool (running → completed);
+      // the first fire often has empty args, a later fire carries the name.
+      // We fire as soon as the name is populated and dedupe by toolCallId so
+      // each invocation is counted exactly once, regardless of final status.
+      if (
+        (toolNameLower === "skill" || toolNameLower === "role_skill") &&
+        !countedSkillToolCalls.has(event.toolCallId)
+      ) {
+        const args = event.arguments as
+          | { name?: unknown; skill?: unknown; skill_name?: unknown }
+          | undefined;
+        const rawName = args?.name ?? args?.skill ?? args?.skill_name;
+        const skillName = typeof rawName === "string" ? rawName : undefined;
+        if (skillName) {
+          const workspacePath = useWorkspaceStore.getState().workspacePath;
+          if (workspacePath) {
+            markSkillCounted(event.toolCallId);
+            void useLocalStatsStore
+              .getState()
+              .incrementSkillUsage(workspacePath, skillName);
+          }
+        }
+      }
     },
 
     // Handle todo.updated SSE event

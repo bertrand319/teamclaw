@@ -179,9 +179,10 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
     } catch (err) {
       console.error('Failed to load providers:', err)
       // Only show toast if it's not a connection error (OpenCode not ready)
-      const isConnectionError = err instanceof Error && err.message.includes('Cannot connect to OpenCode')
+      const isConnectionError = err instanceof Error && (err.message.includes('Cannot connect to OpenCode') || err.message.includes('Load failed'))
       if (!isConnectionError) {
         toast.error('Failed to load providers', {
+          id: 'provider-list-error',
           description: err instanceof Error ? err.message : 'Unknown error',
         })
       }
@@ -230,9 +231,10 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
     } catch (err) {
       console.error('Failed to load configured providers:', err)
       // Only show toast if it's not a connection error (OpenCode not ready)
-      const isConnectionError = err instanceof Error && err.message.includes('Cannot connect to OpenCode')
+      const isConnectionError = err instanceof Error && (err.message.includes('Cannot connect to OpenCode') || err.message.includes('Load failed'))
       if (!isConnectionError) {
         toast.error('Failed to load model list', {
+          id: 'model-list-error',
           description: err instanceof Error ? err.message : 'Unknown error',
         })
       }

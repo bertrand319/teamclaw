@@ -9,6 +9,7 @@
 //! - Trash file management
 //!
 //! Tauri command wrappers remain in the main crate.
+#![allow(clippy::too_many_arguments)]
 
 pub mod trash;
 
@@ -18,7 +19,7 @@ pub use iroh_blobs;
 pub use iroh_docs;
 pub use iroh_gossip;
 
-use teamclaw_sync::{MemberRole, TeamManifest, TeamMember, FileSyncStatus, SyncFileStatus};
+use teamclaw_sync::{FileSyncStatus, MemberRole, SyncFileStatus, TeamManifest, TeamMember};
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -349,7 +350,10 @@ impl IrohNode {
         let store = FsStore::load(&blob_path)
             .await
             .map_err(|e| format!("Failed to create iroh blob store: {}", e))?;
-        eprintln!("[P2P] Blob store loaded ({:.0}ms)", t0.elapsed().as_millis());
+        eprintln!(
+            "[P2P] Blob store loaded ({:.0}ms)",
+            t0.elapsed().as_millis()
+        );
 
         let secret_key = load_or_create_secret_key(storage_path)?;
         eprintln!("[P2P] Binding endpoint...");
@@ -369,7 +373,10 @@ impl IrohNode {
             .spawn(endpoint.clone(), blobs_store.clone(), gossip.clone())
             .await
             .map_err(|e| format!("Failed to start docs engine: {}", e))?;
-        eprintln!("[P2P] Docs engine started ({:.0}ms)", t0.elapsed().as_millis());
+        eprintln!(
+            "[P2P] Docs engine started ({:.0}ms)",
+            t0.elapsed().as_millis()
+        );
 
         let author = docs
             .author_default()
@@ -499,11 +506,23 @@ fn resolve_team_entry_path(team_dir: &str, key: &str) -> Result<std::path::PathB
     Ok(Path::new(team_dir).join(normalized))
 }
 
-fn persist_local_role_from_team_dir(team_dir: &str, role: &MemberRole, teamclaw_dir: &str, config_file_name: &str, team_repo_dir: &str) -> Result<(), String> {
+fn persist_local_role_from_team_dir(
+    team_dir: &str,
+    role: &MemberRole,
+    teamclaw_dir: &str,
+    config_file_name: &str,
+    team_repo_dir: &str,
+) -> Result<(), String> {
     let workspace_path = workspace_path_from_team_dir(team_dir, team_repo_dir);
-    let mut config = read_p2p_config(&workspace_path, teamclaw_dir, config_file_name)?.unwrap_or_default();
+    let mut config =
+        read_p2p_config(&workspace_path, teamclaw_dir, config_file_name)?.unwrap_or_default();
     config.role = Some(role.clone());
-    write_p2p_config(&workspace_path, Some(&config), teamclaw_dir, config_file_name)
+    write_p2p_config(
+        &workspace_path,
+        Some(&config),
+        teamclaw_dir,
+        config_file_name,
+    )
 }
 
 /// Tauri managed state for the iroh node.
@@ -550,22 +569,55 @@ pub fn collect_files(base: &Path, dir: &Path) -> Vec<(String, Vec<u8>)> {
         return files;
     }
 
-    // Build gitignore matcher from .gitignore files in the team directory tree
+    // Build gitignore matcher with hardcoded global excludes (same as OSS/Git)
+    // plus any .gitignore files in the team directory tree
     let gitignore = {
         let mut builder = ignore::gitignore::GitignoreBuilder::new(dir);
+
+        // Global excludes — build artifacts / caches / local-only dirs
+        const GLOBAL_EXCLUDES: &[&str] = &[
+            ".trash/",
+            ".DS_Store",
+            "node_modules/",
+            ".git/",
+            "target/",
+            "dist/",
+            "build/",
+            "out/",
+            ".cache/",
+            ".turbo/",
+            ".next/",
+            ".nuxt/",
+            ".output/",
+            "__pycache__/",
+            ".venv/",
+            "venv/",
+            ".tox/",
+            "vendor/",
+            ".gradle/",
+            ".m2/",
+            "*.log",
+            "*.tmp",
+        ];
+        for pattern in GLOBAL_EXCLUDES {
+            let _ = builder.add_line(None, pattern);
+        }
+
         let root_gi = dir.join(".gitignore");
         if root_gi.exists() {
             let _ = builder.add(root_gi);
         }
         // Also check subdirectories for .gitignore files
-        for subdir in &["skills", "knowledge"] {
+        for subdir in &["skills", "knowledge", ".mcp"] {
             let sub_gi = dir.join(subdir).join(".gitignore");
             if sub_gi.exists() {
                 let _ = builder.add(&sub_gi);
             }
         }
         builder.build().unwrap_or_else(|_| {
-            ignore::gitignore::GitignoreBuilder::new(dir).build().unwrap()
+            ignore::gitignore::GitignoreBuilder::new(dir)
+                .build()
+                .unwrap()
         })
     };
 
@@ -576,7 +628,10 @@ pub fn collect_files(base: &Path, dir: &Path) -> Vec<(String, Vec<u8>)> {
         let path = entry.path();
 
         // Apply gitignore rules
-        if gitignore.matched(path, entry.file_type().is_dir()).is_ignore() {
+        if gitignore
+            .matched(path, entry.file_type().is_dir())
+            .is_ignore()
+        {
             continue;
         }
 
@@ -681,6 +736,7 @@ pub async fn create_team(
         node_id: node_id.clone(),
         name: owner_name.unwrap_or_default(),
         role: MemberRole::Owner,
+        shortcuts_role: Vec::new(),
         label: info.hostname.clone(),
         platform: info.platform,
         arch: info.arch,
@@ -688,7 +744,7 @@ pub async fn create_team(
         added_at: chrono::Utc::now().to_rfc3339(),
     };
 
-    write_members_manifest(team_dir, &node_id, &[owner_member.clone()])?;
+    write_members_manifest(team_dir, &node_id, std::slice::from_ref(&owner_member))?;
 
     // Create a new iroh-docs document
     let doc = node
@@ -758,7 +814,8 @@ pub async fn create_team(
     node.active_doc = Some(doc);
 
     // Update P2P config with ownership
-    let mut config = read_p2p_config(workspace_path, teamclaw_dir, config_file_name)?.unwrap_or_default();
+    let mut config =
+        read_p2p_config(workspace_path, teamclaw_dir, config_file_name)?.unwrap_or_default();
     config.enabled = true;
     config.publish_enabled = true;
     config.owner_node_id = Some(node_id);
@@ -766,7 +823,12 @@ pub async fn create_team(
     config.namespace_id = Some(namespace_id);
     config.doc_ticket = Some(ticket_str.clone());
     config.role = Some(MemberRole::Owner);
-    write_p2p_config(workspace_path, Some(&config), teamclaw_dir, config_file_name)?;
+    write_p2p_config(
+        workspace_path,
+        Some(&config),
+        teamclaw_dir,
+        config_file_name,
+    )?;
 
     Ok(ticket_str)
 }
@@ -805,9 +867,10 @@ pub async fn join_team_drive(
     for attempt in 1..=10 {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
-        file_count = write_doc_entries_to_disk(&doc, &node.store, team_dir, event_handler.as_deref())
-            .await
-            .unwrap_or(0);
+        file_count =
+            write_doc_entries_to_disk(&doc, &node.store, team_dir, event_handler.as_deref())
+                .await
+                .unwrap_or(0);
 
         // If the manifest synced, check authorization eagerly
         match check_join_authorization(team_dir, &joiner_node_id) {
@@ -864,7 +927,8 @@ pub async fn join_team_drive(
 
     let namespace_id = doc.id().to_string();
 
-    let existing_config = read_p2p_config(workspace_path, teamclaw_dir, config_file_name)?.unwrap_or_default();
+    let existing_config =
+        read_p2p_config(workspace_path, teamclaw_dir, config_file_name)?.unwrap_or_default();
     let manifest = read_members_manifest(team_dir)?;
     let joiner_role = manifest
         .as_ref()
@@ -900,9 +964,17 @@ pub async fn join_team_drive(
     }
 
     // Resolve seed endpoint if seed_url is configured
-    let existing_config = read_p2p_config(workspace_path, teamclaw_dir, config_file_name)?.unwrap_or_default();
+    let existing_config =
+        read_p2p_config(workspace_path, teamclaw_dir, config_file_name)?.unwrap_or_default();
     let seed_ep = if let Some(ref seed_url) = existing_config.seed_url {
-        resolve_seed_endpoint(seed_url, workspace_path, &existing_config, teamclaw_dir, config_file_name).await
+        resolve_seed_endpoint(
+            seed_url,
+            workspace_path,
+            &existing_config,
+            teamclaw_dir,
+            config_file_name,
+        )
+        .await
     } else {
         None
     };
@@ -937,7 +1009,8 @@ pub async fn join_team_drive(
     node.active_doc = Some(doc);
 
     // Save config
-    let mut config = read_p2p_config(workspace_path, teamclaw_dir, config_file_name)?.unwrap_or_default();
+    let mut config =
+        read_p2p_config(workspace_path, teamclaw_dir, config_file_name)?.unwrap_or_default();
     config.enabled = true;
     config.namespace_id = Some(namespace_id);
     config.doc_ticket = Some(ticket_str.to_string());
@@ -947,7 +1020,12 @@ pub async fn join_team_drive(
         config.owner_node_id = manifest_owner;
     }
     config.last_sync_at = Some(chrono::Utc::now().to_rfc3339());
-    write_p2p_config(workspace_path, Some(&config), teamclaw_dir, config_file_name)?;
+    write_p2p_config(
+        workspace_path,
+        Some(&config),
+        teamclaw_dir,
+        config_file_name,
+    )?;
 
     Ok(format!("Synced {} files from team drive", file_count))
 }
@@ -1092,7 +1170,10 @@ async fn reconcile_disk_and_doc(
                         key
                     );
                     if let Err(e) = trash::trash_file(Path::new(team_dir), &key) {
-                        eprintln!("[P2P][reconcile] Failed to trash before delete {}: {}", key, e);
+                        eprintln!(
+                            "[P2P][reconcile] Failed to trash before delete {}: {}",
+                            key, e
+                        );
                     }
                     let _ = std::fs::remove_file(&file_path);
                     continue;
@@ -1140,7 +1221,10 @@ async fn reconcile_disk_and_doc(
                     if let Ok(content) = blobs_store.blobs().get_bytes(entry.content_hash()).await {
                         if !is_tombstone(&content) {
                             if let Err(e) = trash::trash_file(Path::new(team_dir), &key) {
-                                eprintln!("[P2P][reconcile] Failed to trash before overwrite {}: {}", key, e);
+                                eprintln!(
+                                    "[P2P][reconcile] Failed to trash before overwrite {}: {}",
+                                    key, e
+                                );
                             }
                             if let Some(parent) = file_path.parent() {
                                 let _ = std::fs::create_dir_all(parent);
@@ -1223,7 +1307,8 @@ pub async fn publish_team_drive(
     teamclaw_dir: &str,
     config_file_name: &str,
 ) -> Result<String, String> {
-    let config = read_p2p_config(workspace_path, teamclaw_dir, config_file_name)?.unwrap_or_default();
+    let config =
+        read_p2p_config(workspace_path, teamclaw_dir, config_file_name)?.unwrap_or_default();
     if config.role == Some(MemberRole::Viewer) {
         return Err("Viewers cannot publish to the team drive".to_string());
     }
@@ -1256,7 +1341,8 @@ pub async fn rotate_namespace(
     config_file_name: &str,
     team_repo_dir: &str,
 ) -> Result<String, String> {
-    let previous_config = read_p2p_config(workspace_path, teamclaw_dir, config_file_name)?.unwrap_or_default();
+    let previous_config =
+        read_p2p_config(workspace_path, teamclaw_dir, config_file_name)?.unwrap_or_default();
     let previous_manifest = read_members_manifest(team_dir)?;
     let previous_team_info =
         std::fs::read(Path::new(team_dir).join("_team").join("team.json")).ok();
@@ -1304,12 +1390,18 @@ pub async fn rotate_namespace(
     }
 
     // Update config with previous members
-    let mut config = read_p2p_config(workspace_path, teamclaw_dir, config_file_name)?.unwrap_or_default();
+    let mut config =
+        read_p2p_config(workspace_path, teamclaw_dir, config_file_name)?.unwrap_or_default();
     if let Some(manifest) = previous_manifest {
         config.allowed_members = manifest.members;
     }
     config.owner_node_id = Some(owner_node_id);
-    write_p2p_config(workspace_path, Some(&config), teamclaw_dir, config_file_name)?;
+    write_p2p_config(
+        workspace_path,
+        Some(&config),
+        teamclaw_dir,
+        config_file_name,
+    )?;
 
     Ok(ticket)
 }
@@ -1381,8 +1473,14 @@ fn build_seed_addr_from_cache(config: &P2pConfig) -> Option<iroh::EndpointAddr> 
     Some(iroh::EndpointAddr { id, addrs })
 }
 
-fn cache_seed_endpoint(workspace_path: &str, addr: &iroh::EndpointAddr, teamclaw_dir: &str, config_file_name: &str) -> Result<(), String> {
-    let mut cfg = read_p2p_config(workspace_path, teamclaw_dir, config_file_name)?.unwrap_or_default();
+fn cache_seed_endpoint(
+    workspace_path: &str,
+    addr: &iroh::EndpointAddr,
+    teamclaw_dir: &str,
+    config_file_name: &str,
+) -> Result<(), String> {
+    let mut cfg =
+        read_p2p_config(workspace_path, teamclaw_dir, config_file_name)?.unwrap_or_default();
     cfg.seed_iroh_node_id = Some(addr.id.to_string());
     cfg.seed_iroh_relay_url = addr.addrs.iter().find_map(|a| {
         if let iroh::TransportAddr::Relay(url) = a {
@@ -1654,7 +1752,10 @@ async fn run_sync_coordinator(
 // ─── Background sync tasks ─────────────────────────────────────────────
 
 /// Emit the current engine snapshot via the event handler.
-async fn emit_engine_state_via(event_handler: &Option<Arc<dyn P2pEventHandler>>, engine: &Arc<Mutex<SyncEngine>>) {
+async fn emit_engine_state_via(
+    event_handler: &Option<Arc<dyn P2pEventHandler>>,
+    engine: &Arc<Mutex<SyncEngine>>,
+) {
     if let Some(ref handler) = event_handler {
         let snapshot = engine.lock().await.snapshot();
         handler.emit_engine_state(&snapshot);
@@ -1818,12 +1919,27 @@ async fn doc_to_disk_watcher(
 
                 // Process complete content
                 process_remote_entry(
-                    &doc, &blobs_store, &key, &author_id_str, entry.content_hash(),
-                    &team_dir, &suppressed_paths, &my_role, &my_node_id, &owner_node_id,
-                    &event_handler, &engine, &manifest_lock,
-                    &mut author_to_node, &mut node_to_role, &mut my_last_known_role,
-                    &teamclaw_dir, &config_file_name, &team_repo_dir,
-                ).await;
+                    &doc,
+                    &blobs_store,
+                    &key,
+                    &author_id_str,
+                    entry.content_hash(),
+                    &team_dir,
+                    &suppressed_paths,
+                    &my_role,
+                    &my_node_id,
+                    &owner_node_id,
+                    &event_handler,
+                    &engine,
+                    &manifest_lock,
+                    &mut author_to_node,
+                    &mut node_to_role,
+                    &mut my_last_known_role,
+                    &teamclaw_dir,
+                    &config_file_name,
+                    &team_repo_dir,
+                )
+                .await;
             }
             LiveEvent::ContentReady { hash } => {
                 let (key, author_id_str) = if let Some(entry) = pending_content.remove(&hash) {
@@ -1850,12 +1966,27 @@ async fn doc_to_disk_watcher(
                 };
 
                 process_remote_entry(
-                    &doc, &blobs_store, &key, &author_id_str, hash,
-                    &team_dir, &suppressed_paths, &my_role, &my_node_id, &owner_node_id,
-                    &event_handler, &engine, &manifest_lock,
-                    &mut author_to_node, &mut node_to_role, &mut my_last_known_role,
-                    &teamclaw_dir, &config_file_name, &team_repo_dir,
-                ).await;
+                    &doc,
+                    &blobs_store,
+                    &key,
+                    &author_id_str,
+                    hash,
+                    &team_dir,
+                    &suppressed_paths,
+                    &my_role,
+                    &my_node_id,
+                    &owner_node_id,
+                    &event_handler,
+                    &engine,
+                    &manifest_lock,
+                    &mut author_to_node,
+                    &mut node_to_role,
+                    &mut my_last_known_role,
+                    &teamclaw_dir,
+                    &config_file_name,
+                    &team_repo_dir,
+                )
+                .await;
             }
             _ => {}
         }
@@ -1916,9 +2047,7 @@ async fn process_remote_entry(
     // Resolve author → node_id
     let mut writer_node_id = author_to_node.get(author_id_str).cloned();
     if writer_node_id.is_none() {
-        if let Some(node_id) =
-            lookup_author_node_id(doc, blobs_store, author_id_str).await
-        {
+        if let Some(node_id) = lookup_author_node_id(doc, blobs_store, author_id_str).await {
             author_to_node.insert(author_id_str.to_string(), node_id.clone());
             writer_node_id = Some(node_id);
         }
@@ -1927,8 +2056,7 @@ async fn process_remote_entry(
     // Handle _team/left/<node_id>
     if key.starts_with("_team/left/") {
         let leaving_node_id = key.trim_start_matches("_team/left/").to_string();
-        let writer_is_member =
-            writer_node_id.as_deref() == Some(leaving_node_id.as_str());
+        let writer_is_member = writer_node_id.as_deref() == Some(leaving_node_id.as_str());
         let we_are_owner = owner_node_id.as_deref() == Some(my_node_id);
 
         if writer_is_member && we_are_owner {
@@ -1943,9 +2071,7 @@ async fn process_remote_entry(
                         .find(|mem| mem.node_id == leaving_node_id)
                         .map(|mem| mem.name)
                 })
-                .unwrap_or_else(|| {
-                    leaving_node_id[..8.min(leaving_node_id.len())].to_string()
-                });
+                .unwrap_or_else(|| leaving_node_id[..8.min(leaving_node_id.len())].to_string());
 
             match remove_member_from_team(
                 &workspace_path,
@@ -1956,19 +2082,13 @@ async fn process_remote_entry(
                 config_file_name,
             ) {
                 Ok(()) => {
-                    eprintln!(
-                        "[P2P] Auto-removed departed member: {}",
-                        leaving_node_id
-                    );
+                    eprintln!("[P2P] Auto-removed departed member: {}", leaving_node_id);
                     {
                         let _guard = manifest_lock.read().await;
                         if let Ok(Some(manifest)) = read_members_manifest(team_dir) {
                             node_to_role.clear();
                             for member in &manifest.members {
-                                node_to_role.insert(
-                                    member.node_id.clone(),
-                                    member.role.clone(),
-                                );
+                                node_to_role.insert(member.node_id.clone(), member.role.clone());
                             }
                         }
                     }
@@ -2043,18 +2163,15 @@ async fn process_remote_entry(
                     if let Some(manifest) = manifest_opt {
                         node_to_role.clear();
                         for member in &manifest.members {
-                            node_to_role
-                                .insert(member.node_id.clone(), member.role.clone());
+                            node_to_role.insert(member.node_id.clone(), member.role.clone());
                         }
 
                         if let Some(ref handler) = event_handler {
                             handler.emit_members_changed();
                         }
 
-                        let still_member =
-                            manifest.members.iter().any(|m| m.node_id == my_node_id);
-                        let we_are_owner =
-                            owner_node_id.as_deref() == Some(my_node_id);
+                        let still_member = manifest.members.iter().any(|m| m.node_id == my_node_id);
+                        let we_are_owner = owner_node_id.as_deref() == Some(my_node_id);
                         if !still_member && !we_are_owner {
                             eprintln!(
                                 "[P2P] We have been removed from the team \u{2014} disconnecting"
@@ -2073,13 +2190,14 @@ async fn process_remote_entry(
                                 let mut current_role = my_role.lock().await;
                                 *current_role = new_role.clone();
                             }
-                            if let Err(e) =
-                                persist_local_role_from_team_dir(team_dir, &new_role, teamclaw_dir, config_file_name, team_repo_dir)
-                            {
-                                eprintln!(
-                                    "[P2P] Failed to persist local role update: {}",
-                                    e
-                                );
+                            if let Err(e) = persist_local_role_from_team_dir(
+                                team_dir,
+                                &new_role,
+                                teamclaw_dir,
+                                config_file_name,
+                                team_repo_dir,
+                            ) {
+                                eprintln!("[P2P] Failed to persist local role update: {}", e);
                             }
                             if my_last_known_role.as_ref() != Some(&new_role) {
                                 if my_last_known_role.is_some() {
@@ -2121,9 +2239,7 @@ async fn process_remote_entry(
     // Normal write
     match resolve_team_entry_path(team_dir, key) {
         Ok(file_path) => {
-            if let Ok(content) =
-                blobs_store.blobs().get_bytes(content_hash).await
-            {
+            if let Ok(content) = blobs_store.blobs().get_bytes(content_hash).await {
                 if is_tombstone(&content) {
                     eprintln!("[P2P][doc\u{2192}disk] Deleting (tombstone): {}", key);
                     let _ = std::fs::remove_file(&file_path);
@@ -2134,10 +2250,11 @@ async fn process_remote_entry(
                         content.len()
                     );
                     write_and_suppress(&file_path, &content, suppressed_paths).await;
-                    if let Ok(mtime) =
-                        std::fs::metadata(&file_path).and_then(|m| m.modified())
-                    {
-                        engine.lock().await.record_file_synced(key.to_string(), mtime);
+                    if let Ok(mtime) = std::fs::metadata(&file_path).and_then(|m| m.modified()) {
+                        engine
+                            .lock()
+                            .await
+                            .record_file_synced(key.to_string(), mtime);
                     }
                 }
             }
@@ -2243,9 +2360,8 @@ async fn disk_to_doc_watcher(
                             }
 
                             if rel_path == "_team/members.json" {
-                                let is_owner = owner_node_id
-                                    .as_deref()
-                                    .map_or(false, |owner| owner == my_node_id);
+                                let is_owner =
+                                    owner_node_id.as_deref().is_some_and(|owner| owner == my_node_id);
                                 if !is_owner {
                                     continue;
                                 }
@@ -2269,7 +2385,7 @@ async fn disk_to_doc_watcher(
                                 }
                                 if path
                                     .file_name()
-                                    .map_or(false, |n| n.eq_ignore_ascii_case("SKILL.md"))
+                                    .is_some_and(|n| n.eq_ignore_ascii_case("SKILL.md"))
                                 {
                                     increment_skills_count(&doc, &blobs_store, author).await;
                                 }
@@ -2609,7 +2725,12 @@ pub struct P2pConfig {
 }
 
 /// Clear the p2p field from teamclaw.json and remove team directory.
-pub fn clear_p2p_and_team_dir(workspace_path: &str, teamclaw_dir: &str, config_file_name: &str, team_repo_dir: &str) -> Result<(), String> {
+pub fn clear_p2p_and_team_dir(
+    workspace_path: &str,
+    teamclaw_dir: &str,
+    config_file_name: &str,
+    team_repo_dir: &str,
+) -> Result<(), String> {
     let config_path = Path::new(workspace_path)
         .join(teamclaw_dir)
         .join(config_file_name);
@@ -2654,13 +2775,12 @@ pub fn clear_p2p_and_team_dir(workspace_path: &str, teamclaw_dir: &str, config_f
 }
 
 /// Read P2P config from teamclaw.json in the workspace.
-pub fn read_p2p_config(workspace_path: &str, teamclaw_dir: &str, config_file_name: &str) -> Result<Option<P2pConfig>, String> {
-    let config_path = format!(
-        "{}/{}/{}",
-        workspace_path,
-        teamclaw_dir,
-        config_file_name
-    );
+pub fn read_p2p_config(
+    workspace_path: &str,
+    teamclaw_dir: &str,
+    config_file_name: &str,
+) -> Result<Option<P2pConfig>, String> {
+    let config_path = format!("{}/{}/{}", workspace_path, teamclaw_dir, config_file_name);
 
     if !Path::new(&config_path).exists() {
         return Ok(None);
@@ -2683,7 +2803,12 @@ pub fn read_p2p_config(workspace_path: &str, teamclaw_dir: &str, config_file_nam
 }
 
 /// Write P2P config to teamclaw.json, preserving other fields.
-pub fn write_p2p_config(workspace_path: &str, config: Option<&P2pConfig>, teamclaw_dir: &str, config_file_name: &str) -> Result<(), String> {
+pub fn write_p2p_config(
+    workspace_path: &str,
+    config: Option<&P2pConfig>,
+    teamclaw_dir: &str,
+    config_file_name: &str,
+) -> Result<(), String> {
     let teamclaw_dir_path = format!("{}/{}", workspace_path, teamclaw_dir);
     let _ = std::fs::create_dir_all(&teamclaw_dir_path);
     let config_path = format!("{}/{}", teamclaw_dir_path, config_file_name);
@@ -2768,9 +2893,12 @@ pub async fn leave_team_for_workspace(
     config_file_name: &str,
     team_repo_dir: &str,
 ) -> Result<(), String> {
-    let config = read_p2p_config(workspace_path, teamclaw_dir, config_file_name)?.unwrap_or_default();
+    let config =
+        read_p2p_config(workspace_path, teamclaw_dir, config_file_name)?.unwrap_or_default();
     if config.role == Some(MemberRole::Owner) {
-        return Err("Team owners cannot leave \u{2014} use Dissolve Team to end the team".to_string());
+        return Err(
+            "Team owners cannot leave \u{2014} use Dissolve Team to end the team".to_string(),
+        );
     }
 
     let mut guard = iroh_state.lock().await;
@@ -2793,7 +2921,12 @@ pub async fn leave_team_for_workspace(
     }
     drop(guard);
 
-    clear_p2p_and_team_dir(workspace_path, teamclaw_dir, config_file_name, team_repo_dir)?;
+    clear_p2p_and_team_dir(
+        workspace_path,
+        teamclaw_dir,
+        config_file_name,
+        team_repo_dir,
+    )?;
 
     Ok(())
 }
@@ -2830,7 +2963,12 @@ pub async fn disconnect_source_for_workspace(
     }
     drop(guard);
 
-    clear_p2p_and_team_dir(workspace_path, teamclaw_dir, config_file_name, team_repo_dir)?;
+    clear_p2p_and_team_dir(
+        workspace_path,
+        teamclaw_dir,
+        config_file_name,
+        team_repo_dir,
+    )?;
 
     Ok(())
 }
@@ -2843,7 +2981,8 @@ pub async fn dissolve_team_for_workspace(
     config_file_name: &str,
     team_repo_dir: &str,
 ) -> Result<(), String> {
-    let config = read_p2p_config(workspace_path, teamclaw_dir, config_file_name)?.unwrap_or_default();
+    let config =
+        read_p2p_config(workspace_path, teamclaw_dir, config_file_name)?.unwrap_or_default();
     if config.role != Some(MemberRole::Owner) {
         return Err("Only the team owner can dissolve the team".to_string());
     }
@@ -2866,7 +3005,12 @@ pub async fn dissolve_team_for_workspace(
     }
     drop(guard);
 
-    clear_p2p_and_team_dir(workspace_path, teamclaw_dir, config_file_name, team_repo_dir)?;
+    clear_p2p_and_team_dir(
+        workspace_path,
+        teamclaw_dir,
+        config_file_name,
+        team_repo_dir,
+    )?;
 
     Ok(())
 }
@@ -2882,7 +3026,8 @@ pub fn add_member_to_team(
     teamclaw_dir: &str,
     config_file_name: &str,
 ) -> Result<(), String> {
-    let mut config = read_p2p_config(workspace_path, teamclaw_dir, config_file_name)?.unwrap_or_default();
+    let mut config =
+        read_p2p_config(workspace_path, teamclaw_dir, config_file_name)?.unwrap_or_default();
 
     let owner_id = config
         .owner_node_id
@@ -2911,7 +3056,12 @@ pub fn add_member_to_team(
     members.push(member);
 
     config.allowed_members = members.clone();
-    write_p2p_config(workspace_path, Some(&config), teamclaw_dir, config_file_name)?;
+    write_p2p_config(
+        workspace_path,
+        Some(&config),
+        teamclaw_dir,
+        config_file_name,
+    )?;
     write_members_manifest(team_dir, owner_id, &members)?;
 
     Ok(())
@@ -2926,7 +3076,8 @@ pub fn remove_member_from_team(
     teamclaw_dir: &str,
     config_file_name: &str,
 ) -> Result<(), String> {
-    let mut config = read_p2p_config(workspace_path, teamclaw_dir, config_file_name)?.unwrap_or_default();
+    let mut config =
+        read_p2p_config(workspace_path, teamclaw_dir, config_file_name)?.unwrap_or_default();
 
     let owner_id = config
         .owner_node_id
@@ -2940,8 +3091,14 @@ pub fn remove_member_from_team(
     };
 
     let is_owner = owner_id == caller_node_id;
-    let caller_role = members.iter().find(|m| m.node_id == caller_node_id).map(|m| &m.role);
-    let is_manager = matches!(caller_role, Some(MemberRole::Owner) | Some(MemberRole::Manager));
+    let caller_role = members
+        .iter()
+        .find(|m| m.node_id == caller_node_id)
+        .map(|m| &m.role);
+    let is_manager = matches!(
+        caller_role,
+        Some(MemberRole::Owner) | Some(MemberRole::Manager)
+    );
     if !is_owner && !is_manager {
         return Err("Only team owner or manager can remove members".to_string());
     }
@@ -2951,8 +3108,14 @@ pub fn remove_member_from_team(
     }
 
     if !is_owner {
-        let target_role = members.iter().find(|m| m.node_id == target_node_id).map(|m| &m.role);
-        if matches!(target_role, Some(MemberRole::Owner) | Some(MemberRole::Manager)) {
+        let target_role = members
+            .iter()
+            .find(|m| m.node_id == target_node_id)
+            .map(|m| &m.role);
+        if matches!(
+            target_role,
+            Some(MemberRole::Owner) | Some(MemberRole::Manager)
+        ) {
             return Err("Managers can only remove editors and viewers".to_string());
         }
     }
@@ -2964,7 +3127,12 @@ pub fn remove_member_from_team(
     }
 
     config.allowed_members = members.clone();
-    write_p2p_config(workspace_path, Some(&config), teamclaw_dir, config_file_name)?;
+    write_p2p_config(
+        workspace_path,
+        Some(&config),
+        teamclaw_dir,
+        config_file_name,
+    )?;
     write_members_manifest(team_dir, owner_id, &members)?;
 
     Ok(())
@@ -2980,7 +3148,8 @@ pub fn update_member_role(
     teamclaw_dir: &str,
     config_file_name: &str,
 ) -> Result<(), String> {
-    let mut config = read_p2p_config(workspace_path, teamclaw_dir, config_file_name)?.unwrap_or_default();
+    let mut config =
+        read_p2p_config(workspace_path, teamclaw_dir, config_file_name)?.unwrap_or_default();
 
     let owner_id = config
         .owner_node_id
@@ -2994,8 +3163,14 @@ pub fn update_member_role(
     };
 
     let is_owner = owner_id == caller_node_id;
-    let caller_role = members.iter().find(|m| m.node_id == caller_node_id).map(|m| m.role.clone());
-    let is_manager = matches!(caller_role, Some(MemberRole::Owner) | Some(MemberRole::Manager));
+    let caller_role = members
+        .iter()
+        .find(|m| m.node_id == caller_node_id)
+        .map(|m| m.role.clone());
+    let is_manager = matches!(
+        caller_role,
+        Some(MemberRole::Owner) | Some(MemberRole::Manager)
+    );
 
     if !is_owner && !is_manager {
         return Err("Only team owner or manager can change roles".to_string());
@@ -3009,7 +3184,10 @@ pub fn update_member_role(
         return Err("Cannot change the owner's role".to_string());
     }
 
-    let target_role = members.iter().find(|m| m.node_id == target_node_id).map(|m| m.role.clone());
+    let target_role = members
+        .iter()
+        .find(|m| m.node_id == target_node_id)
+        .map(|m| m.role.clone());
 
     if !is_owner {
         if matches!(new_role, MemberRole::Owner | MemberRole::Manager) {
@@ -3031,7 +3209,12 @@ pub fn update_member_role(
     member.role = new_role;
 
     config.allowed_members = members.clone();
-    write_p2p_config(workspace_path, Some(&config), teamclaw_dir, config_file_name)?;
+    write_p2p_config(
+        workspace_path,
+        Some(&config),
+        teamclaw_dir,
+        config_file_name,
+    )?;
     write_members_manifest(team_dir, owner_id, &members)?;
 
     Ok(())
@@ -3065,12 +3248,11 @@ pub async fn reconnect_team_for_workspace(
     let is_owner = config
         .owner_node_id
         .as_deref()
-        .map_or(false, |owner| owner == my_node_id);
+        .is_some_and(|owner| owner == my_node_id);
 
-    let ticket_str = config
-        .doc_ticket
-        .as_ref()
-        .ok_or_else(|| "No saved ticket \u{2014} cannot reconnect. Please rejoin the team.".to_string())?;
+    let ticket_str = config.doc_ticket.as_ref().ok_or_else(|| {
+        "No saved ticket \u{2014} cannot reconnect. Please rejoin the team.".to_string()
+    })?;
     let ticket = ticket_str
         .trim()
         .parse::<iroh_docs::DocTicket>()
@@ -3098,8 +3280,12 @@ pub async fn reconnect_team_for_workspace(
         }
     }
 
-    let my_role = config.role.clone().unwrap_or_else(|| {
-        if is_owner { MemberRole::Owner } else { MemberRole::Editor }
+    let my_role = config.role.clone().unwrap_or({
+        if is_owner {
+            MemberRole::Owner
+        } else {
+            MemberRole::Editor
+        }
     });
 
     let temp_engine: Arc<Mutex<SyncEngine>> = Arc::new(Mutex::new(SyncEngine::new()));
@@ -3120,7 +3306,14 @@ pub async fn reconnect_team_for_workspace(
     }
 
     let seed_ep = if let Some(ref seed_url) = config.seed_url {
-        resolve_seed_endpoint(seed_url, workspace_path, &config, teamclaw_dir, config_file_name).await
+        resolve_seed_endpoint(
+            seed_url,
+            workspace_path,
+            &config,
+            teamclaw_dir,
+            config_file_name,
+        )
+        .await
     } else {
         None
     };
@@ -3267,7 +3460,7 @@ pub async fn query_skills_leaderboard(node: &IrohNode) -> Result<Vec<SkillsContr
         }
     }
 
-    results.sort_by(|a, b| b.edit_count.cmp(&a.edit_count));
+    results.sort_by_key(|result| std::cmp::Reverse(result.edit_count));
     Ok(results)
 }
 
@@ -3282,7 +3475,6 @@ pub async fn get_files_sync_status(
         .active_doc
         .as_ref()
         .ok_or_else(|| "No active team document".to_string())?;
-    let blobs_store: iroh_blobs::api::Store = node.store.clone().into();
 
     let query = iroh_docs::store::Query::single_latest_per_key().build();
     let entries = doc

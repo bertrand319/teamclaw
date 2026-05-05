@@ -1,7 +1,7 @@
-use serde_json::{json, Value};
-use tauri::{AppHandle, Runtime, Manager, Emitter, Listener};
 use log::info;
+use serde_json::{Value, json};
 use std::sync::mpsc;
+use tauri::{AppHandle, Emitter, Listener, Manager, Runtime};
 
 use crate::error::Error;
 use crate::socket_server::SocketResponse;
@@ -31,8 +31,9 @@ pub async fn handle_get_performance_metrics<R: Runtime>(
     app: &AppHandle<R>,
     payload: Value,
 ) -> Result<SocketResponse, Error> {
-    let request: PerformanceMetricsRequest = serde_json::from_value(payload)
-        .map_err(|e| Error::serialization_error(format!("Invalid payload for performance metrics: {}", e)))?;
+    let request: PerformanceMetricsRequest = serde_json::from_value(payload).map_err(|e| {
+        Error::serialization_error(format!("Invalid payload for performance metrics: {}", e))
+    })?;
 
     // Get the window label or use "main" as default
     let window_label = request
@@ -59,10 +60,12 @@ pub async fn handle_get_performance_metrics<R: Runtime>(
     let (tx, rx) = mpsc::channel();
 
     app.emit_to(&window_label, "execute-js", &js_code)
-        .map_err(|e| Error::communication_error_with_context(
-            "Failed to emit execute-js event",
-            format!("window: {}, error: {}", window_label, e),
-        ))?;
+        .map_err(|e| {
+            Error::communication_error_with_context(
+                "Failed to emit execute-js event",
+                format!("window: {}, error: {}", window_label, e),
+            )
+        })?;
 
     // Listen for response
     app.once("execute-js-response", move |event| {
@@ -72,23 +75,30 @@ pub async fn handle_get_performance_metrics<R: Runtime>(
 
     // Wait for the response with timeout
     let timeout = std::time::Duration::from_millis(request.timeout_ms.unwrap_or(10000));
-    let result_string = rx
-        .recv_timeout(timeout)
-        .map_err(|_| Error::timeout_error("performance metrics execution", request.timeout_ms.unwrap_or(10000)))?;
+    let result_string = rx.recv_timeout(timeout).map_err(|_| {
+        Error::timeout_error(
+            "performance metrics execution",
+            request.timeout_ms.unwrap_or(10000),
+        )
+    })?;
 
     // Parse the response
-    let response_value: Value = serde_json::from_str(&result_string)
-        .map_err(|e| Error::serialization_error(format!("Failed to parse performance metrics response: {}", e)))?;
+    let response_value: Value = serde_json::from_str(&result_string).map_err(|e| {
+        Error::serialization_error(format!(
+            "Failed to parse performance metrics response: {}",
+            e
+        ))
+    })?;
 
     // Check if result contains an error
-    if let Some(error) = response_value.get("error") {
-        if let Some(error_str) = error.as_str() {
-            return Ok(SocketResponse {
-                success: false,
-                data: None,
-                error: Some(error_str.to_string()),
-            });
-        }
+    if let Some(error) = response_value.get("error")
+        && let Some(error_str) = error.as_str()
+    {
+        return Ok(SocketResponse {
+            success: false,
+            data: None,
+            error: Some(error_str.to_string()),
+        });
     }
 
     // Extract and process the result
@@ -97,8 +107,9 @@ pub async fn handle_get_performance_metrics<R: Runtime>(
             // Parse the metrics result
             match serde_json::from_str::<Value>(result_str) {
                 Ok(metrics) => {
-                    let data = serde_json::to_value(metrics)
-                        .map_err(|e| Error::serialization_error(format!("Failed to serialize response: {}", e)))?;
+                    let data = serde_json::to_value(metrics).map_err(|e| {
+                        Error::serialization_error(format!("Failed to serialize response: {}", e))
+                    })?;
 
                     info!("[TAURI_MCP] Performance metrics retrieved successfully");
 
@@ -109,7 +120,10 @@ pub async fn handle_get_performance_metrics<R: Runtime>(
                     })
                 }
                 Err(e) => {
-                    info!("[TAURI_MCP] Failed to parse performance metrics result: {}", e);
+                    info!(
+                        "[TAURI_MCP] Failed to parse performance metrics result: {}",
+                        e
+                    );
                     Ok(SocketResponse {
                         success: true,
                         data: Some(json!({
@@ -242,45 +256,43 @@ fn generate_performance_metrics_code(
         );
 
         // Add resource filtering logic if provided
-        if let Some(filter) = resource_filter {
-            if filter.resource_type.is_some() || filter.min_duration_ms.is_some() {
-                code.push_str(
-                    r#"
+        if let Some(filter) = resource_filter
+            && (filter.resource_type.is_some() || filter.min_duration_ms.is_some())
+        {
+            code.push_str(
+                r#"
                     // Apply filters
                     const resourceTypeFilter = ["#,
-                );
+            );
 
-                if let Some(types) = filter.resource_type {
-                    code.push_str(&format!(
-                        "\"{}\"",
-                        types.join("\", \"")
-                    ));
-                }
+            if let Some(types) = filter.resource_type {
+                code.push_str(&format!("\"{}\"", types.join("\", \"")));
+            }
 
-                code.push_str(
-                    r#"];
+            code.push_str(
+                r#"];
                     const minDurationMs = "#,
-                );
+            );
 
-                if let Some(min_dur) = filter.min_duration_ms {
-                    code.push_str(&min_dur.to_string());
-                } else {
-                    code.push_str("0");
-                }
+            if let Some(min_dur) = filter.min_duration_ms {
+                code.push_str(&min_dur.to_string());
+            } else {
+                code.push('0');
+            }
 
-                code.push_str(
-                    r#";
+            code.push_str(
+                r#";
                     const maxDurationMs = "#,
-                );
+            );
 
-                if let Some(max_dur) = filter.max_duration_ms {
-                    code.push_str(&max_dur.to_string());
-                } else {
-                    code.push_str("Infinity");
-                }
+            if let Some(max_dur) = filter.max_duration_ms {
+                code.push_str(&max_dur.to_string());
+            } else {
+                code.push_str("Infinity");
+            }
 
-                code.push_str(
-                    r#";
+            code.push_str(
+                r#";
 
                     if (resourceTypeFilter.length > 0 && !resourceTypeFilter.includes(resourceType)) {
                         return;
@@ -291,8 +303,7 @@ fn generate_performance_metrics_code(
                         return;
                     }
 "#,
-                );
-            }
+            );
         }
 
         code.push_str(
