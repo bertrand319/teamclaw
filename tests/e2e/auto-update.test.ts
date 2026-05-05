@@ -36,6 +36,20 @@ describe('Auto Update - Configuration', () => {
     expect(config.bundle.createUpdaterArtifacts).toBe(true);
   });
 
+  it('build.config.json exports updater configuration to Rust', () => {
+    const buildConfigPath = path.resolve(repoRoot, 'build.config.json');
+    const tauriConfigPath = path.resolve(repoRoot, 'src-tauri', 'tauri.conf.json');
+    const buildConfig = JSON.parse(fs.readFileSync(buildConfigPath, 'utf-8'));
+    const tauriConfig = JSON.parse(fs.readFileSync(tauriConfigPath, 'utf-8'));
+
+    expect(buildConfig.app?.updater?.endpoint).toBe(
+      tauriConfig.plugins.updater.endpoints[0],
+    );
+    expect(buildConfig.app?.updater?.pubkey).toBe(
+      tauriConfig.plugins.updater.pubkey,
+    );
+  });
+
   it('Cargo.toml has updater and process plugins', () => {
     const cargoPath = path.resolve(repoRoot, 'src-tauri', 'Cargo.toml');
     const cargo = fs.readFileSync(cargoPath, 'utf-8');
@@ -61,7 +75,7 @@ describe('Auto Update - Configuration', () => {
     );
     const workflow = fs.readFileSync(workflowPath, 'utf-8');
 
-    expect(workflow).toContain("'v*'");
+    expect(workflow).toMatch(/-\s*["']v\*["']/);
     expect(workflow).toContain('tauri-apps/tauri-action');
     expect(workflow).toContain('TAURI_SIGNING_PRIVATE_KEY');
     expect(workflow).toContain('TAURI_SIGNING_PRIVATE_KEY_PASSWORD');
