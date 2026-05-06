@@ -292,6 +292,16 @@ export function createLoaderActions(set: SessionSet, get: SessionGet) {
         }
 
         await get().setActiveSession(id);
+        const stateAfterActivation = get();
+        if (
+          stateAfterActivation.activeSessionId !== id ||
+          !getSessionById(id) ||
+          stateAfterActivation.isLoading ||
+          stateAfterActivation.error
+        ) {
+          set({ archivedSessionError: "Restored session could not be opened" });
+          return;
+        }
 
         set((state) => {
           const archivedSessionMessages = { ...state.archivedSessionMessages };
