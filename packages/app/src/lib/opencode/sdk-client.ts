@@ -136,6 +136,7 @@ export interface OpenCodeClientCompat {
   getSessionChildren: typeof getSessionChildren
   deleteSession: typeof deleteSession
   archiveSession: typeof archiveSession
+  restoreSession: typeof restoreSession
   updateSession: typeof updateSession
   abortSession: typeof abortSession
   getMessages: typeof getMessages
@@ -179,7 +180,7 @@ let compatClient: OpenCodeClientCompat | null = null
 function buildCompat(): OpenCodeClientCompat {
   return {
     createSession, listSessions, getSession, getSessionChildren, deleteSession,
-    archiveSession, updateSession, abortSession, getMessages,
+    archiveSession, restoreSession, updateSession, abortSession, getMessages,
     sendMessage, sendMessageWithParts, sendMessageAsync,
     sendMessageWithPartsAsync, replyQuestion, rejectQuestion,
     listQuestions, getTodos, getSessionDiff, getFileStatus,
@@ -249,12 +250,14 @@ export async function createSession(): Promise<Session> {
 export async function listSessions(options?: {
   directory?: string
   roots?: boolean
+  archived?: boolean
 }): Promise<SessionListItem[]> {
   const c = getRawSdkClient()
   const result = await c.session.list({
     directory: options?.directory || dir(),
     roots: options?.roots,
-  })
+    archived: options?.archived,
+  } as unknown as Parameters<typeof c.session.list>[0])
   return unwrap(result) as unknown as SessionListItem[]
 }
 
@@ -283,6 +286,16 @@ export async function archiveSession(id: string, directory?: string): Promise<vo
     directory: directory || dir(),
     time: { archived: Date.now() },
   })
+  unwrap(result)
+}
+
+export async function restoreSession(id: string, directory?: string): Promise<void> {
+  const c = getRawSdkClient()
+  const result = await c.session.update({
+    sessionID: id,
+    directory: directory || dir(),
+    time: { archived: null },
+  } as unknown as Parameters<typeof c.session.update>[0])
   unwrap(result)
 }
 
