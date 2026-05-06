@@ -399,6 +399,52 @@ describe('session-loader: createLoaderActions', () => {
     expect(state.archivedSessionError).toBe('Restored session was not found after reload')
   })
 
+  it('restoreSession keeps archived state when activation fails after reload', async () => {
+    const now = Date.now()
+    const archivedSession = {
+      id: 'archived-1',
+      title: 'Archived',
+      messages: [],
+      createdAt: new Date(now - 2000),
+      updatedAt: new Date(now - 1000),
+      archivedAt: new Date(now),
+      isArchived: true,
+      directory: '/workspace',
+    }
+    state.currentWorkspacePath = '/workspace'
+    state.archivedSessions = [archivedSession]
+    state.viewingArchivedSessionId = 'archived-1'
+    state.archivedSessionMessages = { 'archived-1': [] }
+
+    mockRestoreSession.mockResolvedValue(undefined)
+    mockListSessions.mockResolvedValue([
+      {
+        id: 'archived-1',
+        title: 'Restored',
+        time: { created: now - 2000, updated: now },
+        directory: '/workspace',
+      },
+    ])
+    mockGetMessages.mockRejectedValue(new Error('message load failed'))
+    mockGetSession.mockResolvedValue({
+      id: 'archived-1',
+      title: 'Restored',
+      time: { created: now - 2000, updated: now },
+      directory: '/workspace',
+    })
+    mockGetTodos.mockResolvedValue([])
+    mockGetSessionDiff.mockResolvedValue([])
+    mockGetSessionChildren.mockResolvedValue([])
+
+    await actions.restoreSession('archived-1')
+
+    expect(mockRestoreSession).toHaveBeenCalledWith('archived-1', '/workspace')
+    expect(state.archivedSessions).toEqual([archivedSession])
+    expect(state.archivedSessionMessages).toEqual({ 'archived-1': [] })
+    expect(state.viewingArchivedSessionId).toBe('archived-1')
+    expect(state.archivedSessionError).toBe('Restored session could not be opened')
+  })
+
   it('loadSessions sets error on failure', async () => {
     mockListSessions.mockRejectedValue(new Error('Network error'))
 

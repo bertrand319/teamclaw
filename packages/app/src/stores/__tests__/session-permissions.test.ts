@@ -510,6 +510,56 @@ describe('createPermissionActions', () => {
     expect(store.pendingPermissions).toEqual([])
   })
 
+  it('pollPermissions treats archived timestamp 0 parents as archived', async () => {
+    const { createPermissionActions } = await import('@/stores/session-permissions')
+    const { getSessionById } = await import('@/stores/session-cache')
+    vi.mocked(getSessionById).mockReturnValue(null)
+    mockGetSession.mockImplementation((sessionId: string) => {
+      if (sessionId === 'deleted-child') {
+        return Promise.resolve({ id: 'deleted-child', parentID: 'deleted-parent', time: {} })
+      }
+      if (sessionId === 'deleted-parent') {
+        return Promise.resolve({ id: 'deleted-parent', time: { archived: 0 } })
+      }
+      return Promise.reject(new Error('not found'))
+    })
+    mockListPermissions.mockResolvedValue([
+      {
+        id: 'perm-archived-zero-parent',
+        sessionID: 'deleted-child',
+        permission: 'bash',
+        patterns: ['ps'],
+        tool: { messageID: 'msg-1', callID: 'tool-1' },
+      },
+    ])
+
+    const store = {
+      activeSessionId: 'new-session',
+      sessions: [{ id: 'new-session', title: 'New', messages: [] }],
+      pendingPermissions: [] as Array<{
+        permission: { id: string; sessionID: string };
+        childSessionId: string | null;
+        ownerSessionId?: string | null;
+      }>,
+      setActiveSession: vi.fn(),
+    }
+    const set = vi.fn((fn: unknown) => {
+      if (typeof fn === 'function') {
+        Object.assign(store, (fn as (s: typeof store) => Partial<typeof store>)(store))
+      } else {
+        Object.assign(store, fn)
+      }
+    })
+    const get = vi.fn(() => store)
+    const actions = createPermissionActions(set as any, get as any)
+
+    await actions.pollPermissions()
+
+    expect(mockGetSession).toHaveBeenCalledWith('deleted-child')
+    expect(mockGetSession).toHaveBeenCalledWith('deleted-parent')
+    expect(store.pendingPermissions).toEqual([])
+  })
+
   it('pollPermissions removes existing stale pending permissions that cannot be resolved', async () => {
     const { createPermissionActions } = await import('@/stores/session-permissions')
     const { getSessionById } = await import('@/stores/session-cache')
