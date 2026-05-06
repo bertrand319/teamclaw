@@ -202,6 +202,18 @@ describe('session-loader: createLoaderActions', () => {
     expect(sessions[0].id).toBe('active')
   })
 
+  it('loadSessions treats archived timestamp 0 as archived', async () => {
+    const now = Date.now()
+    mockListSessions.mockResolvedValue([
+      { id: 'active', title: 'Active', time: { created: now, updated: now } },
+      { id: 'archived-zero', title: 'Archived Zero', time: { created: now, updated: now, archived: 0 } },
+    ])
+
+    await actions.loadSessions()
+
+    expect((state.sessions as any[]).map((session) => session.id)).toEqual(['active'])
+  })
+
   it('loadArchivedSessions loads only archived parent sessions sorted by archivedAt descending', async () => {
     const now = Date.now()
     mockListSessions.mockResolvedValue([
@@ -269,6 +281,36 @@ describe('session-loader: createLoaderActions', () => {
     expect(state.sessions).toEqual([])
   })
 
+  it('openArchivedSession ignores stale results after archived viewing is closed', async () => {
+    const now = Date.now()
+    let resolveMessages: (messages: any[]) => void = () => {}
+    mockGetMessages.mockReturnValue(
+      new Promise((resolve) => {
+        resolveMessages = resolve
+      }),
+    )
+
+    const openPromise = actions.openArchivedSession('archived-1')
+    expect(state.viewingArchivedSessionId).toBe('archived-1')
+
+    actions.closeArchivedSession()
+    resolveMessages([
+      {
+        info: {
+          id: 'msg-1',
+          sessionID: 'archived-1',
+          role: 'user',
+          time: { created: now },
+        },
+        parts: [{ id: 'part-1', type: 'text', text: 'stale' }],
+      },
+    ])
+    await openPromise
+
+    expect(state.viewingArchivedSessionId).toBeNull()
+    expect(state.archivedSessionMessages).toEqual({})
+  })
+
   it('closeArchivedSession clears viewing state', () => {
     state.viewingArchivedSessionId = 'archived-1'
 
@@ -324,6 +366,37 @@ describe('session-loader: createLoaderActions', () => {
     expect(mockListSessions).toHaveBeenCalledWith({ directory: '/workspace', roots: true })
     expect(state.activeSessionId).toBe('archived-1')
     expect(mockGetSessionChildren).toHaveBeenCalledWith('archived-1')
+  })
+
+  it('restoreSession keeps archived state when restored session is missing after reload', async () => {
+    const now = Date.now()
+    const archivedSession = {
+      id: 'archived-1',
+      title: 'Archived',
+      messages: [],
+      createdAt: new Date(now - 2000),
+      updatedAt: new Date(now - 1000),
+      archivedAt: new Date(now),
+      isArchived: true,
+      directory: '/workspace',
+    }
+    state.currentWorkspacePath = '/workspace'
+    state.archivedSessions = [archivedSession]
+    state.viewingArchivedSessionId = 'archived-1'
+    state.archivedSessionMessages = { 'archived-1': [] }
+
+    mockRestoreSession.mockResolvedValue(undefined)
+    mockListSessions.mockResolvedValue([])
+
+    await actions.restoreSession('archived-1')
+
+    expect(mockRestoreSession).toHaveBeenCalledWith('archived-1', '/workspace')
+    expect(state.archivedSessions).toEqual([archivedSession])
+    expect(state.archivedSessionMessages).toEqual({ 'archived-1': [] })
+    expect(state.viewingArchivedSessionId).toBe('archived-1')
+    expect(state.activeSessionId).toBeNull()
+    expect(mockGetMessages).not.toHaveBeenCalled()
+    expect(state.archivedSessionError).toBe('Restored session was not found after reload')
   })
 
   it('loadSessions sets error on failure', async () => {
