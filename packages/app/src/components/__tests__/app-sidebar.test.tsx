@@ -422,6 +422,75 @@ describe('AppSidebar', () => {
     })
   })
 
+  it("session search All mode shows active and archived sessions", () => {
+    sessionStoreMocks.archivedSessions = [
+      {
+        id: "archived-1",
+        title: "Archived Todo Chat",
+        updatedAt: new Date("2026-05-01T10:00:00.000Z"),
+        archivedAt: new Date("2026-05-02T10:00:00.000Z"),
+        isArchived: true,
+        messages: [],
+      },
+    ]
+
+    render(<AppSidebar />)
+
+    fireEvent.click(screen.getByTitle("Search (⌘K)"))
+    const dialog = screen.getByTestId("session-search-dialog")
+    fireEvent.click(within(dialog).getByRole("button", { name: "All" }))
+
+    expect(sessionStoreMocks.loadArchivedSessions).toHaveBeenCalledWith("/workspace")
+    expect(within(dialog).getByText("Session One")).toBeDefined()
+    expect(within(dialog).getByText("Archived Todo Chat")).toBeDefined()
+  })
+
+  it("selecting an active search result from All switches sessions without opening archived mode", () => {
+    sessionStoreMocks.archivedSessions = [
+      {
+        id: "archived-1",
+        title: "Archived Todo Chat",
+        updatedAt: new Date("2026-05-01T10:00:00.000Z"),
+        archivedAt: new Date("2026-05-02T10:00:00.000Z"),
+        isArchived: true,
+        messages: [],
+      },
+    ]
+
+    render(<AppSidebar />)
+
+    fireEvent.click(screen.getByTitle("Search (⌘K)"))
+    const dialog = screen.getByTestId("session-search-dialog")
+    fireEvent.click(within(dialog).getByRole("button", { name: "All" }))
+    fireEvent.click(within(dialog).getByText("Session One"))
+
+    expect(uiStoreMocks.switchToSession).toHaveBeenCalledWith("s1")
+    expect(sessionStoreMocks.openArchivedSession).not.toHaveBeenCalledWith("s1")
+  })
+
+  it("selecting an archived search result from All opens archived mode without switching active sessions", () => {
+    sessionStoreMocks.archivedSessions = [
+      {
+        id: "archived-1",
+        title: "Archived Todo Chat",
+        updatedAt: new Date("2026-05-01T10:00:00.000Z"),
+        archivedAt: new Date("2026-05-02T10:00:00.000Z"),
+        isArchived: true,
+        messages: [],
+      },
+    ]
+
+    render(<AppSidebar />)
+
+    fireEvent.click(screen.getByTitle("Search (⌘K)"))
+    const dialog = screen.getByTestId("session-search-dialog")
+    fireEvent.click(within(dialog).getByRole("button", { name: "All" }))
+    fireEvent.click(within(dialog).getByText("Archived Todo Chat"))
+
+    expect(sessionStoreMocks.openArchivedSession).toHaveBeenCalledWith("archived-1")
+    expect(uiStoreMocks.switchToSession).not.toHaveBeenCalledWith("archived-1")
+  })
+
   it('default mode uses the knowledge header controls for the knowledge tab', () => {
     uiVariantMocks.workspaceShell = false
     uiStoreMocks.defaultNavTab = 'knowledge'
