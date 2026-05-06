@@ -118,18 +118,7 @@ export function ChatPanel({ compact = false }: ChatPanelProps) {
   const pendingQuestions = useSessionStore(s => s.pendingQuestions);
   const sessions = useSessionStore(s => s.sessions);
 
-  // ── Child session viewing ──────────────────────────────────────────
-  const viewingChildSessionId = useSessionStore(s => s.viewingChildSessionId);
-  const childSessionMessages = useSessionStore(s =>
-    s.viewingChildSessionId
-      ? (s.childSessionMessages[s.viewingChildSessionId] || EMPTY_MESSAGES)
-      : EMPTY_MESSAGES
-  );
-  const isLoadingChildMessages = useSessionStore(s => s.isLoadingChildMessages);
-  const childStreamingContent = useStreamingStore(s =>
-    viewingChildSessionId ? s.childSessionStreaming[viewingChildSessionId] : undefined
-  );
-  const isViewingChild = !!viewingChildSessionId;
+  // ── Archived session viewing ────────────────────────────────────────
   const viewingArchivedSessionId = useSessionStore(s => s.viewingArchivedSessionId);
   const archivedSessionMessages = useSessionStore(s =>
     s.viewingArchivedSessionId
@@ -142,6 +131,21 @@ export function ChatPanel({ compact = false }: ChatPanelProps) {
       : undefined
   );
   const isViewingArchived = !!viewingArchivedSessionId;
+
+  // ── Child session viewing ──────────────────────────────────────────
+  const viewingChildSessionId = useSessionStore(s => s.viewingChildSessionId);
+  const childSessionMessages = useSessionStore(s =>
+    s.viewingChildSessionId && !s.viewingArchivedSessionId
+      ? (s.childSessionMessages[s.viewingChildSessionId] || EMPTY_MESSAGES)
+      : EMPTY_MESSAGES
+  );
+  const isLoadingChildMessages = useSessionStore(s => s.isLoadingChildMessages);
+  const childStreamingContent = useStreamingStore(s =>
+    viewingChildSessionId && !isViewingArchived
+      ? s.childSessionStreaming[viewingChildSessionId]
+      : undefined
+  );
+  const isViewingChild = !!viewingChildSessionId && !isViewingArchived;
   const showInlineTodo = React.useMemo(() => {
     if (isViewingArchived) return false;
     if (isViewingChild) return false;
@@ -149,7 +153,7 @@ export function ChatPanel({ compact = false }: ChatPanelProps) {
     return !hasVisiblePendingPermissions(activeSessionId, sessions, pendingPermissions);
   }, [activeSessionId, isViewingArchived, isViewingChild, messageQueue.length, pendingPermissions, sessions, todos]);
   const displayedChildSessionMessages = React.useMemo(() => {
-    if (!viewingChildSessionId) return EMPTY_MESSAGES;
+    if (!isViewingChild || !viewingChildSessionId) return EMPTY_MESSAGES;
 
     const hasLiveChildStreaming =
       !!childStreamingContent &&
@@ -185,7 +189,7 @@ export function ChatPanel({ compact = false }: ChatPanelProps) {
         timestamp: placeholderTimestamp,
       },
     ];
-  }, [childSessionMessages, childStreamingContent, viewingChildSessionId]);
+  }, [childSessionMessages, childStreamingContent, isViewingChild, viewingChildSessionId]);
   const activeInputQuestion = React.useMemo(() => {
     if (!activeSessionId) return null;
     if (isViewingArchived) return null;
@@ -216,6 +220,7 @@ export function ChatPanel({ compact = false }: ChatPanelProps) {
   const setDraftInput = acts.setDraftInput;
   const closeArchivedSession = acts.closeArchivedSession;
   const restoreSession = acts.restoreSession;
+  const setViewingChildSession = acts.setViewingChildSession;
 
   // ── Workspace store ───────────────────────────────────────────────────
   const workspacePath = useWorkspaceStore(s => s.workspacePath);
@@ -230,6 +235,8 @@ export function ChatPanel({ compact = false }: ChatPanelProps) {
   const [imageFiles, setImageFiles] = React.useState<File[]>([]);
   const [hasSkillRestartPrompt, setHasSkillRestartPrompt] = React.useState(false);
   const [isRestartingSkillsRuntime, setIsRestartingSkillsRuntime] = React.useState(false);
+  const [isRestoringArchived, setIsRestoringArchived] = React.useState(false);
+  const isRestoringArchivedRef = React.useRef(false);
 
   const isImagePath = React.useCallback((path: string) => {
     return /\.(png|jpe?g|gif|webp|svg|bmp|ico|heic|heif)$/i.test(path);
@@ -747,6 +754,23 @@ export function ChatPanel({ compact = false }: ChatPanelProps) {
     }
   }, [workspacePath, setOpenCodeBootstrapped, setError]);
 
+  const handleCloseArchivedSession = React.useCallback(() => {
+    closeArchivedSession();
+    setViewingChildSession?.(null);
+  }, [closeArchivedSession, setViewingChildSession]);
+
+  const handleRestoreArchivedSession = React.useCallback(async () => {
+    if (!viewingArchivedSessionId || isRestoringArchivedRef.current) return;
+    isRestoringArchivedRef.current = true;
+    setIsRestoringArchived(true);
+    try {
+      await restoreSession(viewingArchivedSessionId);
+    } finally {
+      isRestoringArchivedRef.current = false;
+      setIsRestoringArchived(false);
+    }
+  }, [restoreSession, viewingArchivedSessionId]);
+
   // ── Empty state with suggestions ──────────────────────────────────────
   const emptyState = React.useMemo(() => (
     <div
@@ -847,7 +871,7 @@ export function ChatPanel({ compact = false }: ChatPanelProps) {
         <div className="flex items-center gap-2 border-b border-border bg-muted/30 px-3 py-2">
           <button
             type="button"
-            onClick={() => closeArchivedSession()}
+            onClick={handleCloseArchivedSession}
             className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
           >
             <ArrowLeft size={14} />
@@ -864,9 +888,10 @@ export function ChatPanel({ compact = false }: ChatPanelProps) {
             size="sm"
             variant="outline"
             className="h-7 gap-1.5 px-2 text-xs"
-            onClick={() => viewingArchivedSessionId && void restoreSession(viewingArchivedSessionId)}
+            disabled={isRestoringArchived}
+            onClick={() => void handleRestoreArchivedSession()}
           >
-            <RefreshCw className="h-3 w-3" />
+            <RefreshCw className={cn("h-3 w-3", isRestoringArchived && "animate-spin")} />
             {t("chat.restoreSession", "Restore")}
           </Button>
         </div>
@@ -925,6 +950,7 @@ export function ChatPanel({ compact = false }: ChatPanelProps) {
             isStreaming={false}
             streamingMessageId={null}
             compact={compact}
+            sessionDirectory={archivedSession?.directory}
           />
         ) : isViewingChild ? (
           isLoadingChildMessages ? (
