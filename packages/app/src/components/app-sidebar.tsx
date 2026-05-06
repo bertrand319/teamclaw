@@ -126,9 +126,9 @@ function SessionSearchDialog({
     onOpenChange(false)
   }
 
-  const handleSelectArchivedSession = async (sessionId: string) => {
-    await openArchivedSession(sessionId)
+  const handleSelectArchivedSession = (sessionId: string) => {
     onOpenChange(false)
+    void openArchivedSession(sessionId)
   }
 
   const activeResults = sessions.map((session) => ({ session, isArchived: false }))

@@ -389,6 +389,11 @@ describe('AppSidebar', () => {
   })
 
   it("selecting an archived search result opens archived read-only mode", async () => {
+    let resolveOpenArchivedSession: () => void
+    const openArchivedSessionPromise = new Promise<void>((resolve) => {
+      resolveOpenArchivedSession = resolve
+    })
+    sessionStoreMocks.openArchivedSession = vi.fn(() => openArchivedSessionPromise)
     sessionStoreMocks.archivedSessions = [
       {
         id: "archived-1",
@@ -407,10 +412,14 @@ describe('AppSidebar', () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "Archived" }))
     fireEvent.click(within(dialog).getByText("Archived Todo Chat"))
 
+    expect(screen.queryByTestId("session-search-dialog")).toBeNull()
+    expect(sessionStoreMocks.openArchivedSession).toHaveBeenCalledWith("archived-1")
+    expect(uiStoreMocks.switchToSession).not.toHaveBeenCalledWith("archived-1")
+
+    resolveOpenArchivedSession!()
     await waitFor(() => {
       expect(sessionStoreMocks.openArchivedSession).toHaveBeenCalledWith("archived-1")
     })
-    expect(uiStoreMocks.switchToSession).not.toHaveBeenCalledWith("archived-1")
   })
 
   it('default mode uses the knowledge header controls for the knowledge tab', () => {
