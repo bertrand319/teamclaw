@@ -145,6 +145,8 @@ export interface Session {
   messageCount?: number;
   directory?: string; // Working directory for this session
   parentID?: string; // Parent session ID (for child/subagent sessions)
+  isArchived?: boolean;
+  archivedAt?: Date;
 }
 
 // Child session (subagent) streaming state

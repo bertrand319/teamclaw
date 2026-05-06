@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { convertMessage } from "@/stores/session-converters";
+import {
+  convertMessage,
+  convertSession,
+  convertSessionListItem,
+} from "@/stores/session-converters";
 import type { Message as OpenCodeMessage } from "@/lib/opencode/sdk-types";
 
 function makeOpenCodeMessage(
@@ -113,5 +117,57 @@ describe("convertMessage", () => {
     expect(converted.displayKind).toBeUndefined();
     expect(converted.hidden).toBeUndefined();
     expect(converted.content).toBe("regular synthetic text");
+  });
+});
+
+describe("session converters archive metadata", () => {
+  it("preserves archive metadata on full sessions", () => {
+    const archivedAt = Date.parse("2026-05-06T09:30:00.000Z");
+
+    const converted = convertSession({
+      id: "ses_archived",
+      title: "Archived chat",
+      directory: "/workspace",
+      time: {
+        created: archivedAt - 2000,
+        updated: archivedAt - 1000,
+        archived: archivedAt,
+      },
+    } as never);
+
+    expect(converted.isArchived).toBe(true);
+    expect(converted.archivedAt?.toISOString()).toBe("2026-05-06T09:30:00.000Z");
+  });
+
+  it("preserves archive metadata on session list items", () => {
+    const archivedAt = Date.parse("2026-05-06T09:31:00.000Z");
+
+    const converted = convertSessionListItem({
+      id: "ses_archived_list",
+      title: "Archived list chat",
+      directory: "/workspace",
+      time: {
+        created: archivedAt - 2000,
+        updated: archivedAt - 1000,
+        archived: archivedAt,
+      },
+    } as never);
+
+    expect(converted.isArchived).toBe(true);
+    expect(converted.archivedAt?.toISOString()).toBe("2026-05-06T09:31:00.000Z");
+  });
+
+  it("leaves active sessions unmarked", () => {
+    const now = Date.parse("2026-05-06T09:32:00.000Z");
+
+    const converted = convertSessionListItem({
+      id: "ses_active",
+      title: "Active chat",
+      directory: "/workspace",
+      time: { created: now - 1000, updated: now },
+    } as never);
+
+    expect(converted.isArchived).toBeUndefined();
+    expect(converted.archivedAt).toBeUndefined();
   });
 });

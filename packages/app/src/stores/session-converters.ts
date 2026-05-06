@@ -13,6 +13,16 @@ function isCompactionContinueMetadata(metadata: unknown): boolean {
   );
 }
 
+function archiveMetadata(
+  time: { archived?: number | null },
+): Pick<Session, "isArchived" | "archivedAt"> {
+  if (!time.archived) return {};
+  return {
+    isArchived: true,
+    archivedAt: new Date(time.archived),
+  };
+}
+
 // Convert OpenCode message to our format
 export function convertMessage(msg: OpenCodeMessage): Message {
   const hasCompactionPart = msg.parts.some((part) => part.type === "compaction");
@@ -167,6 +177,7 @@ export function convertSession(session: OpenCodeSession): Session {
     updatedAt: new Date(session.time.updated),
     directory: session.directory,
     parentID: session.parentID,
+    ...archiveMetadata(session.time),
   };
 }
 
@@ -180,5 +191,6 @@ export function convertSessionListItem(item: SessionListItem): Session {
     updatedAt: new Date(item.time.updated),
     directory: item.directory,
     parentID: item.parentID,
+    ...archiveMetadata(item.time),
   };
 }
