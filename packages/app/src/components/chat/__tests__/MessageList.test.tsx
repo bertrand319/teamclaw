@@ -5,6 +5,7 @@ globalThis.ResizeObserver = vi.fn().mockImplementation(() => ({
 }))
 
 import { fireEvent, render, screen } from '@testing-library/react';
+import { readFile } from '@tauri-apps/plugin-fs';
 import { useSessionStore } from '@/stores/session';
 import { useStreamingStore } from '@/stores/streaming';
 import { MessageList } from '../MessageList';
@@ -31,6 +32,8 @@ vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
 }));
 
+const readFileMock = vi.mocked(readFile);
+
 // ── Helpers ────────────────────────────────────────────────────────────
 
 function makeMessage(overrides: Partial<Message> = {}): Message {
@@ -51,6 +54,7 @@ function makeMessage(overrides: Partial<Message> = {}): Message {
 
 describe('MessageList', () => {
   beforeEach(() => {
+    readFileMock.mockResolvedValue(new Uint8Array([1, 2, 3]));
     useStreamingStore.setState({
       streamingMessageId: null,
       streamingContent: '',
@@ -174,5 +178,27 @@ describe('MessageList', () => {
     expect(container.textContent).toContain('↓2.5k');
     expect(container.textContent).toContain('↑33');
     expect(container.textContent).toContain('tokens');
+  });
+
+  it('uses an explicit sessionDirectory for relative local image paths', async () => {
+    const message = makeMessage({
+      id: 'image-message',
+      role: 'user',
+      content: '[Image: screenshot.png]',
+      timestamp: new Date('2024-01-01T10:00:00Z'),
+    });
+
+    render(
+      <MessageList
+        messages={[message]}
+        activeSessionId="sess-1"
+        isStreaming={false}
+        streamingMessageId={null}
+        sessionDirectory="/archived/workspace"
+      />,
+    );
+
+    expect(await screen.findByAltText('screenshot.png')).toBeTruthy();
+    expect(readFileMock).toHaveBeenCalledWith('/archived/workspace/screenshot.png');
   });
 });
