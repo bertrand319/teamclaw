@@ -4,8 +4,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 const mockListSessions = vi.fn()
 const mockCreateSession = vi.fn()
 const mockArchiveSession = vi.fn()
+const mockRestoreSession = vi.fn()
 const mockGetMessages = vi.fn()
 const mockGetSession = vi.fn()
+const mockGetSessionChildren = vi.fn()
 const mockGetTodos = vi.fn()
 const mockGetSessionDiff = vi.fn()
 const mockClearStreaming = vi.fn()
@@ -15,8 +17,10 @@ vi.mock('@/lib/opencode/sdk-client', () => ({
     listSessions: mockListSessions,
     createSession: mockCreateSession,
     archiveSession: mockArchiveSession,
+    restoreSession: mockRestoreSession,
     getMessages: mockGetMessages,
     getSession: mockGetSession,
+    getSessionChildren: mockGetSessionChildren,
     getTodos: mockGetTodos,
     getSessionDiff: mockGetSessionDiff,
   }),
@@ -97,6 +101,11 @@ describe('session-loader: createLoaderActions', () => {
       isLoadingMore: false,
       hasMoreSessions: false,
       visibleSessionCount: 50,
+      archivedSessions: [],
+      isLoadingArchivedSessions: false,
+      archivedSessionError: null,
+      viewingArchivedSessionId: null,
+      archivedSessionMessages: {},
     }
 
     set = vi.fn((updater) => {
@@ -109,6 +118,7 @@ describe('session-loader: createLoaderActions', () => {
     })
     get = vi.fn(() => state)
     actions = createLoaderActions(set, get)
+    Object.assign(state, actions)
   })
 
   it('loadSessions fetches sessions and sorts by updatedAt descending', async () => {
@@ -190,6 +200,130 @@ describe('session-loader: createLoaderActions', () => {
     const sessions = sessionsCall![0].sessions
     expect(sessions).toHaveLength(1)
     expect(sessions[0].id).toBe('active')
+  })
+
+  it('loadArchivedSessions loads only archived parent sessions sorted by archivedAt descending', async () => {
+    const now = Date.now()
+    mockListSessions.mockResolvedValue([
+      {
+        id: 'archived-older',
+        title: 'Archived Older',
+        time: { created: now - 4000, updated: now - 3000, archived: now - 2000 },
+        directory: '/workspace',
+      },
+      {
+        id: 'active',
+        title: 'Active',
+        time: { created: now - 1000, updated: now - 1000 },
+        directory: '/workspace',
+      },
+      {
+        id: 'archived-child',
+        title: 'Archived Child',
+        time: { created: now - 3000, updated: now - 2000, archived: now },
+        parentID: 'archived-older',
+        directory: '/workspace',
+      },
+      {
+        id: 'archived-newer',
+        title: 'Archived Newer',
+        time: { created: now - 5000, updated: now - 4000, archived: now - 1000 },
+        directory: '/workspace',
+      },
+    ])
+
+    await actions.loadArchivedSessions('/workspace')
+
+    expect(mockListSessions).toHaveBeenCalledWith({ directory: '/workspace', roots: true, archived: true })
+    expect(state.archivedSessions).toHaveLength(2)
+    expect((state.archivedSessions as any[]).map((session) => session.id)).toEqual([
+      'archived-newer',
+      'archived-older',
+    ])
+    expect(state.isLoadingArchivedSessions).toBe(false)
+    expect(state.archivedSessionError).toBeNull()
+  })
+
+  it('openArchivedSession loads messages without adding to normal sessions', async () => {
+    const now = Date.now()
+    state.sessions = []
+    mockGetMessages.mockResolvedValue([
+      {
+        info: {
+          id: 'msg-1',
+          sessionID: 'archived-1',
+          role: 'user',
+          time: { created: now },
+        },
+        parts: [{ id: 'part-1', type: 'text', text: 'hello' }],
+      },
+    ])
+
+    await actions.openArchivedSession('archived-1')
+
+    expect(mockGetMessages).toHaveBeenCalledWith('archived-1')
+    expect(state.viewingArchivedSessionId).toBe('archived-1')
+    expect(state.archivedSessionMessages).toMatchObject({
+      'archived-1': [expect.objectContaining({ id: 'msg-1', content: 'hello' })],
+    })
+    expect(state.sessions).toEqual([])
+  })
+
+  it('closeArchivedSession clears viewing state', () => {
+    state.viewingArchivedSessionId = 'archived-1'
+
+    actions.closeArchivedSession()
+
+    expect(state.viewingArchivedSessionId).toBeNull()
+  })
+
+  it('restoreSession restores archived session, clears archived state, reloads normal sessions, and activates it', async () => {
+    const now = Date.now()
+    state.currentWorkspacePath = '/workspace'
+    state.archivedSessions = [
+      {
+        id: 'archived-1',
+        title: 'Archived',
+        messages: [],
+        createdAt: new Date(now - 2000),
+        updatedAt: new Date(now - 1000),
+        archivedAt: new Date(now),
+        isArchived: true,
+        directory: '/workspace',
+      },
+    ]
+    state.viewingArchivedSessionId = 'archived-1'
+    state.archivedSessionMessages = { 'archived-1': [] }
+
+    mockRestoreSession.mockResolvedValue(undefined)
+    mockListSessions.mockResolvedValue([
+      {
+        id: 'archived-1',
+        title: 'Restored',
+        time: { created: now - 2000, updated: now },
+        directory: '/workspace',
+      },
+    ])
+    mockGetMessages.mockResolvedValue([])
+    mockGetSession.mockResolvedValue({
+      id: 'archived-1',
+      title: 'Restored',
+      time: { created: now - 2000, updated: now },
+      directory: '/workspace',
+    })
+    mockGetTodos.mockResolvedValue([])
+    mockGetSessionDiff.mockResolvedValue([])
+    mockGetSessionChildren.mockResolvedValue([])
+
+    await actions.restoreSession('archived-1')
+
+    expect(mockRestoreSession).toHaveBeenCalledWith('archived-1', '/workspace')
+    expect(state.archivedSessions).toEqual([])
+    expect(state.archivedSessionMessages).toEqual({})
+    expect(state.viewingArchivedSessionId).toBeNull()
+    expect(mockListSessions).toHaveBeenCalledWith({ directory: '/workspace', roots: true })
+    expect(state.activeSessionId).toBe('archived-1')
+    expect(mockGetSessionChildren).toHaveBeenCalledWith('archived-1')
   })
 
   it('loadSessions sets error on failure', async () => {
