@@ -28,6 +28,7 @@ export interface MessageListProps {
   isStreaming: boolean;
   streamingMessageId: string | null;
   compact?: boolean;
+  sessionDirectory?: string;
   /** Optional empty-state content rendered when there are no messages (not loading) */
   emptyState?: React.ReactNode;
 }
@@ -47,6 +48,7 @@ export const MessageList = React.forwardRef<MessageListHandle, MessageListProps>
       isStreaming,
       streamingMessageId: _streamingMessageId,
       compact = false,
+      sessionDirectory,
       emptyState,
     },
     ref,
@@ -75,9 +77,10 @@ export const MessageList = React.forwardRef<MessageListHandle, MessageListProps>
     // Object references from .find() change on every sessions update → unnecessary re-renders.
     // Use `activeSessionId` prop (may lag store during ChatPanel fade) so paths match shown messages.
     const activeSessionDirectory = useSessionStore((s) =>
-      activeSessionId
+      sessionDirectory ??
+      (activeSessionId
         ? s.sessions.find((ss) => ss.id === activeSessionId)?.directory
-        : undefined,
+        : undefined),
     );
 
     // ── Sorted messages ──────────────────────────────────────────────────
