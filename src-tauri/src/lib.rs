@@ -577,6 +577,7 @@ pub fn run() {
             commands::webview::webview_find_in_page,
             commands::webview::webview_clear_find,
             commands::webview::webview_set_zoom,
+            commands::workspace_files::read_workspace_directory,
             commands::workspace_files::read_workspace_text_file,
             commands::workspace_files::read_workspace_binary_file,
             commands::app_settings::get_spotlight_shortcut,
