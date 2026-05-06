@@ -62,6 +62,11 @@ export function createLoaderActions(set: SessionSet, get: SessionGet) {
         isLoadingMore: false,
         hasMoreSessions: false,
         visibleSessionCount: UI_PAGE_SIZE,
+        archivedSessions: [],
+        isLoadingArchivedSessions: false,
+        archivedSessionError: null,
+        viewingArchivedSessionId: null,
+        archivedSessionMessages: {},
       });
     },
 
@@ -207,6 +212,101 @@ export function createLoaderActions(set: SessionSet, get: SessionGet) {
       );
     },
 
+    // Load archived root sessions separately from the normal session list
+    loadArchivedSessions: async (workspacePath?: string) => {
+      set({ isLoadingArchivedSessions: true, archivedSessionError: null });
+      try {
+        const client = getOpenCodeClient();
+        const directory = workspacePath ?? get().currentWorkspacePath ?? undefined;
+        const sessions = await client.listSessions(
+          directory
+            ? { directory, roots: true, archived: true }
+            : { roots: true, archived: true },
+        );
+
+        const archivedSessions = sessions
+          .filter((session) => session.time?.archived != null && !session.parentID)
+          .map(convertSessionListItem)
+          .sort((a, b) => {
+            const aTime = a.archivedAt ?? a.updatedAt;
+            const bTime = b.archivedAt ?? b.updatedAt;
+            return bTime.getTime() - aTime.getTime();
+          });
+
+        set({
+          archivedSessions,
+          isLoadingArchivedSessions: false,
+          archivedSessionError: null,
+        });
+      } catch (error) {
+        set({
+          archivedSessionError:
+            error instanceof Error ? error.message : "Failed to load archived sessions",
+          isLoadingArchivedSessions: false,
+        });
+      }
+    },
+
+    // Open archived messages without adding the session to the active session list
+    openArchivedSession: async (id: string) => {
+      try {
+        const client = getOpenCodeClient();
+        const messages = await client.getMessages(id);
+        const converted = messages.map(convertMessage);
+
+        set((state) => ({
+          viewingArchivedSessionId: id,
+          archivedSessionMessages: {
+            ...state.archivedSessionMessages,
+            [id]: converted,
+          },
+          archivedSessionError: null,
+        }));
+      } catch (error) {
+        set({
+          archivedSessionError:
+            error instanceof Error ? error.message : "Failed to load archived messages",
+        });
+      }
+    },
+
+    closeArchivedSession: () => {
+      set({ viewingArchivedSessionId: null });
+    },
+
+    restoreSession: async (id: string) => {
+      try {
+        const client = getOpenCodeClient();
+        const session = get().archivedSessions.find((s) => s.id === id);
+        const directory = session?.directory ?? get().currentWorkspacePath ?? undefined;
+
+        await client.restoreSession(id, directory);
+
+        set((state) => {
+          const archivedSessionMessages = { ...state.archivedSessionMessages };
+          delete archivedSessionMessages[id];
+
+          return {
+            archivedSessions: state.archivedSessions.filter((s) => s.id !== id),
+            archivedSessionMessages,
+            viewingArchivedSessionId:
+              state.viewingArchivedSessionId === id
+                ? null
+                : state.viewingArchivedSessionId,
+            archivedSessionError: null,
+          };
+        });
+
+        await get().loadSessions(directory);
+        await get().setActiveSession(id);
+      } catch (error) {
+        set({
+          archivedSessionError:
+            error instanceof Error ? error.message : "Failed to restore session",
+        });
+      }
+    },
+
     // Create a new session
     createSession: async (_workspacePath?: string) => {
       // Save current session's message queue and pending question to cache before creating new session
@@ -243,6 +343,7 @@ export function createLoaderActions(set: SessionSet, get: SessionGet) {
           return {
             sessions: newSessions,
             activeSessionId: session.id,
+            viewingArchivedSessionId: null,
             isLoading: true,
             messageQueue: [],
             todos: [],
@@ -278,7 +379,11 @@ export function createLoaderActions(set: SessionSet, get: SessionGet) {
       } = get();
 
       if (id !== prevSessionId) {
-        set({ viewingChildSessionId: null, childSessionMessages: {} });
+        set({
+          viewingChildSessionId: null,
+          childSessionMessages: {},
+          viewingArchivedSessionId: null,
+        });
       }
 
       // Save current session's todos, diff, message queue, and pending questions to cache before switching
