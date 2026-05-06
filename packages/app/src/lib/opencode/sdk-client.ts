@@ -253,12 +253,18 @@ export async function listSessions(options?: {
   archived?: boolean
 }): Promise<SessionListItem[]> {
   const c = getRawSdkClient()
+  const hasArchivedFilter =
+    options != null && Object.prototype.hasOwnProperty.call(options, 'archived')
   const params = {
     directory: options?.directory || dir(),
     roots: options?.roots,
-    archived: options?.archived,
   }
-  const result = await c.session.list(params)
+  const result = hasArchivedFilter
+    ? await c.experimental.session.list({
+      ...params,
+      archived: options?.archived,
+    })
+    : await c.session.list(params)
   return unwrap(result) as unknown as SessionListItem[]
 }
 
