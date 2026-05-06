@@ -1,6 +1,6 @@
 import * as React from "react";
 import { useTranslation } from "react-i18next";
-import { AlertCircle, ArrowLeft, Bot, Loader2, RefreshCw, X } from "lucide-react";
+import { AlertCircle, Archive, ArrowLeft, Bot, Loader2, RefreshCw, X } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { cn, isTauri } from "@/lib/utils";
 
@@ -130,11 +130,24 @@ export function ChatPanel({ compact = false }: ChatPanelProps) {
     viewingChildSessionId ? s.childSessionStreaming[viewingChildSessionId] : undefined
   );
   const isViewingChild = !!viewingChildSessionId;
+  const viewingArchivedSessionId = useSessionStore(s => s.viewingArchivedSessionId);
+  const archivedSessionMessages = useSessionStore(s =>
+    s.viewingArchivedSessionId
+      ? (s.archivedSessionMessages[s.viewingArchivedSessionId] || EMPTY_MESSAGES)
+      : EMPTY_MESSAGES
+  );
+  const archivedSession = useSessionStore(s =>
+    s.viewingArchivedSessionId
+      ? s.archivedSessions.find((session) => session.id === s.viewingArchivedSessionId)
+      : undefined
+  );
+  const isViewingArchived = !!viewingArchivedSessionId;
   const showInlineTodo = React.useMemo(() => {
+    if (isViewingArchived) return false;
     if (isViewingChild) return false;
     if (todos.length === 0 && messageQueue.length === 0) return false;
     return !hasVisiblePendingPermissions(activeSessionId, sessions, pendingPermissions);
-  }, [activeSessionId, isViewingChild, messageQueue.length, pendingPermissions, sessions, todos]);
+  }, [activeSessionId, isViewingArchived, isViewingChild, messageQueue.length, pendingPermissions, sessions, todos]);
   const displayedChildSessionMessages = React.useMemo(() => {
     if (!viewingChildSessionId) return EMPTY_MESSAGES;
 
@@ -175,6 +188,7 @@ export function ChatPanel({ compact = false }: ChatPanelProps) {
   }, [childSessionMessages, childStreamingContent, viewingChildSessionId]);
   const activeInputQuestion = React.useMemo(() => {
     if (!activeSessionId) return null;
+    if (isViewingArchived) return null;
     if (isViewingChild) return null;
     return (
       pendingQuestions.find((question) => {
@@ -186,7 +200,7 @@ export function ChatPanel({ compact = false }: ChatPanelProps) {
       }) ||
       null
     );
-  }, [activeSessionId, isViewingChild, pendingQuestions, sessions]);
+  }, [activeSessionId, isViewingArchived, isViewingChild, pendingQuestions, sessions]);
 
   // Actions — accessed via getState() to avoid creating subscriptions.
   // Zustand actions are stable references; subscribing to them wastes equality checks.
@@ -200,6 +214,8 @@ export function ChatPanel({ compact = false }: ChatPanelProps) {
   const setError = acts.setError;
   const setStoreSelectedModel = acts.setSelectedModel;
   const setDraftInput = acts.setDraftInput;
+  const closeArchivedSession = acts.closeArchivedSession;
+  const restoreSession = acts.restoreSession;
 
   // ── Workspace store ───────────────────────────────────────────────────
   const workspacePath = useWorkspaceStore(s => s.workspacePath);
@@ -826,6 +842,36 @@ export function ChatPanel({ compact = false }: ChatPanelProps) {
         </div>
       )}
 
+      {/* ─── Archived session read-only bar ─── */}
+      {isViewingArchived && (
+        <div className="flex items-center gap-2 border-b border-border bg-muted/30 px-3 py-2">
+          <button
+            type="button"
+            onClick={() => closeArchivedSession()}
+            className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+          >
+            <ArrowLeft size={14} />
+            <span>{t("chat.backToActiveSession", "Back to active session")}</span>
+          </button>
+          <div className="min-w-0 flex flex-1 items-center gap-1.5 text-xs text-muted-foreground">
+            <Archive size={12} />
+            <span className="truncate">
+              {archivedSession?.title || t("chat.archivedSession", "Archived session")}
+            </span>
+          </div>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-7 gap-1.5 px-2 text-xs"
+            onClick={() => viewingArchivedSessionId && void restoreSession(viewingArchivedSessionId)}
+          >
+            <RefreshCw className="h-3 w-3" />
+            {t("chat.restoreSession", "Restore")}
+          </Button>
+        </div>
+      )}
+
       {/* ─── Child session back bar ─── */}
       {isViewingChild && (
         <div className="flex items-center gap-2 px-3 py-1.5 border-b border-border bg-muted/30">
@@ -869,9 +915,18 @@ export function ChatPanel({ compact = false }: ChatPanelProps) {
           "flex-1 min-h-0 flex flex-col overflow-hidden",
           "transition-opacity duration-150 ease-in-out motion-reduce:transition-none",
         )}
-        style={{ opacity: isViewingChild ? 1 : sessionFadeOpacity }}
+        style={{ opacity: isViewingArchived || isViewingChild ? 1 : sessionFadeOpacity }}
       >
-        {isViewingChild ? (
+        {isViewingArchived ? (
+          <MessageList
+            ref={messageListRef}
+            messages={archivedSessionMessages}
+            activeSessionId={viewingArchivedSessionId}
+            isStreaming={false}
+            streamingMessageId={null}
+            compact={compact}
+          />
+        ) : isViewingChild ? (
           isLoadingChildMessages ? (
             <div className="flex items-center justify-center flex-1">
               <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
@@ -900,7 +955,13 @@ export function ChatPanel({ compact = false }: ChatPanelProps) {
       </div>
 
       {/* ─── Input Area (with Permission & Error UI above it) ─────────── */}
-      {!isViewingChild && (
+      {isViewingArchived ? (
+        <div className="border-t border-border bg-background px-3 py-3">
+          <div className="rounded-lg border border-dashed bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
+            {t("chat.restoreArchivedHint", "Restore this session to continue chatting")}
+          </div>
+        </div>
+      ) : !isViewingChild && (
         activeInputQuestion ? (
           <QuestionInputDock
             compact={compact}

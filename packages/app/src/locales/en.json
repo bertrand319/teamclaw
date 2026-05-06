@@ -77,6 +77,10 @@
     "send": "Send",
     "clear": "Clear Chat",
     "newChat": "New Chat",
+    "backToActiveSession": "Back to active session",
+    "archivedSession": "Archived session",
+    "restoreSession": "Restore",
+    "restoreArchivedHint": "Restore this session to continue chatting",
     "agent": "Agent",
     "startNewChat": "Start a New Chat",
     "suggestions": {

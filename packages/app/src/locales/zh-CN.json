@@ -77,6 +77,10 @@
     "send": "发送",
     "clear": "清空聊天",
     "newChat": "新聊天",
+    "backToActiveSession": "返回活跃会话",
+    "archivedSession": "归档会话",
+    "restoreSession": "恢复",
+    "restoreArchivedHint": "恢复此会话后可继续聊天",
     "agent": "助手",
     "startNewChat": "开始新对话",
     "suggestions": {
