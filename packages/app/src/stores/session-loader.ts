@@ -97,7 +97,7 @@ export function createLoaderActions(set: SessionSet, get: SessionGet) {
         // Filter out archived, child, and internal sessions
         const activeSessions = sessions.filter(
           (session) =>
-            !session.time?.archived &&
+            session.time?.archived == null &&
             !session.parentID,
         );
         const filteredCount = sessions.length - activeSessions.length;
@@ -152,7 +152,7 @@ export function createLoaderActions(set: SessionSet, get: SessionGet) {
           try {
             const children = await client.getSessionChildren(activeSessionId);
             apiChildSessions = children
-              .filter((c) => !c.time?.archived)
+              .filter((c) => c.time?.archived == null)
               .map(convertSessionListItem);
             if (apiChildSessions.length > 0) {
               console.log("[Session] Loaded", apiChildSessions.length, "child sessions from API for active session:", activeSessionId);
@@ -249,13 +249,15 @@ export function createLoaderActions(set: SessionSet, get: SessionGet) {
 
     // Open archived messages without adding the session to the active session list
     openArchivedSession: async (id: string) => {
+      set({ viewingArchivedSessionId: id, archivedSessionError: null });
       try {
         const client = getOpenCodeClient();
         const messages = await client.getMessages(id);
+        if (get().viewingArchivedSessionId !== id) return;
+
         const converted = messages.map(convertMessage);
 
         set((state) => ({
-          viewingArchivedSessionId: id,
           archivedSessionMessages: {
             ...state.archivedSessionMessages,
             [id]: converted,
@@ -263,6 +265,7 @@ export function createLoaderActions(set: SessionSet, get: SessionGet) {
           archivedSessionError: null,
         }));
       } catch (error) {
+        if (get().viewingArchivedSessionId !== id) return;
         set({
           archivedSessionError:
             error instanceof Error ? error.message : "Failed to load archived messages",
@@ -282,6 +285,14 @@ export function createLoaderActions(set: SessionSet, get: SessionGet) {
 
         await client.restoreSession(id, directory);
 
+        await get().loadSessions(directory);
+        if (!get().sessions.some((s) => s.id === id)) {
+          set({ archivedSessionError: "Restored session was not found after reload" });
+          return;
+        }
+
+        await get().setActiveSession(id);
+
         set((state) => {
           const archivedSessionMessages = { ...state.archivedSessionMessages };
           delete archivedSessionMessages[id];
@@ -296,9 +307,6 @@ export function createLoaderActions(set: SessionSet, get: SessionGet) {
             archivedSessionError: null,
           };
         });
-
-        await get().loadSessions(directory);
-        await get().setActiveSession(id);
       } catch (error) {
         set({
           archivedSessionError:
@@ -379,10 +387,13 @@ export function createLoaderActions(set: SessionSet, get: SessionGet) {
       } = get();
 
       if (id !== prevSessionId) {
+        const isRestoredArchivedSession =
+          get().archivedSessions.some((s) => s.id === id) &&
+          get().sessions.some((s) => s.id === id);
         set({
           viewingChildSessionId: null,
           childSessionMessages: {},
-          viewingArchivedSessionId: null,
+          ...(isRestoredArchivedSession ? {} : { viewingArchivedSessionId: null }),
         });
       }
 
@@ -574,7 +585,7 @@ export function createLoaderActions(set: SessionSet, get: SessionGet) {
           if (childSessionsData.length > 0) {
             const existingIds = new Set(newSessions.map((s) => s.id));
             const apiChildren = childSessionsData
-              .filter((c) => !c.time?.archived && !existingIds.has(c.id))
+              .filter((c) => c.time?.archived == null && !existingIds.has(c.id))
               .map(convertSessionListItem);
             if (apiChildren.length > 0) {
               console.log("[Session] Merged", apiChildren.length, "API child sessions for session:", id);
@@ -748,7 +759,7 @@ export function createLoaderActions(set: SessionSet, get: SessionGet) {
         );
 
         const activeSessions = allSessions.filter(
-          (s) => !s.time?.archived,
+          (s) => s.time?.archived == null,
         );
 
         const existingSessions = get().sessions;
