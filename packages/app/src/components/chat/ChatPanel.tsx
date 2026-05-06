@@ -130,6 +130,7 @@ export function ChatPanel({ compact = false }: ChatPanelProps) {
       ? s.archivedSessions.find((session) => session.id === s.viewingArchivedSessionId)
       : undefined
   );
+  const archivedSessionError = useSessionStore(s => s.archivedSessionError);
   const isViewingArchived = !!viewingArchivedSessionId;
 
   // ── Child session viewing ──────────────────────────────────────────
@@ -983,6 +984,19 @@ export function ChatPanel({ compact = false }: ChatPanelProps) {
       {/* ─── Input Area (with Permission & Error UI above it) ─────────── */}
       {isViewingArchived ? (
         <div className="border-t border-border bg-background px-3 py-3">
+          {archivedSessionError && (
+            <div className="mb-2 flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+              <div className="min-w-0">
+                <div className="font-medium">
+                  {t("chat.archivedSessionLoadError", "Could not load archived session")}
+                </div>
+                <div className="break-words text-xs text-destructive/80">
+                  {archivedSessionError}
+                </div>
+              </div>
+            </div>
+          )}
           <div className="rounded-lg border border-dashed bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
             {t("chat.restoreArchivedHint", "Restore this session to continue chatting")}
           </div>

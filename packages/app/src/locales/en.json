@@ -80,6 +80,7 @@
     "backToActiveSession": "Back to active session",
     "archivedSession": "Archived session",
     "restoreSession": "Restore",
+    "archivedSessionLoadError": "Could not load archived session",
     "restoreArchivedHint": "Restore this session to continue chatting",
     "agent": "Agent",
     "startNewChat": "Start a New Chat",

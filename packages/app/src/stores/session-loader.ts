@@ -37,6 +37,18 @@ type SessionGet = () => SessionState;
 const MAX_BULK_MESSAGE_SESSION_LOAD = 30;
 
 export function createLoaderActions(set: SessionSet, get: SessionGet) {
+  let archivedLoadRequestId = 0;
+
+  const shouldApplyArchivedLoad = (requestId: number, directory?: string) => {
+    if (requestId !== archivedLoadRequestId) return false;
+    const currentDirectory = get().currentWorkspacePath ?? undefined;
+    if (directory && currentDirectory && currentDirectory !== directory) {
+      set({ isLoadingArchivedSessions: false });
+      return false;
+    }
+    return true;
+  };
+
   return {
     // Reset sessions (clear all session data and cache)
     resetSessions: () => {
@@ -214,15 +226,21 @@ export function createLoaderActions(set: SessionSet, get: SessionGet) {
 
     // Load archived root sessions separately from the normal session list
     loadArchivedSessions: async (workspacePath?: string) => {
-      set({ isLoadingArchivedSessions: true, archivedSessionError: null });
+      const requestId = ++archivedLoadRequestId;
+      const directory = workspacePath ?? get().currentWorkspacePath ?? undefined;
+      set({
+        archivedSessions: [],
+        isLoadingArchivedSessions: true,
+        archivedSessionError: null,
+      });
       try {
         const client = getOpenCodeClient();
-        const directory = workspacePath ?? get().currentWorkspacePath ?? undefined;
         const sessions = await client.listSessions(
           directory
             ? { directory, roots: true, archived: true }
             : { roots: true, archived: true },
         );
+        if (!shouldApplyArchivedLoad(requestId, directory)) return;
 
         const archivedSessions = sessions
           .filter((session) => session.time?.archived != null && !session.parentID)
@@ -239,6 +257,7 @@ export function createLoaderActions(set: SessionSet, get: SessionGet) {
           archivedSessionError: null,
         });
       } catch (error) {
+        if (!shouldApplyArchivedLoad(requestId, directory)) return;
         set({
           archivedSessionError:
             error instanceof Error ? error.message : "Failed to load archived sessions",

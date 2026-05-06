@@ -256,6 +256,84 @@ describe('session-loader: createLoaderActions', () => {
     expect(state.archivedSessionError).toBeNull()
   })
 
+  it('loadArchivedSessions clears stale results while a new load is pending', async () => {
+    state.archivedSessions = [
+      {
+        id: 'old-archived',
+        title: 'Old Archived',
+        messages: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        isArchived: true,
+        archivedAt: new Date(),
+      },
+    ]
+    mockListSessions.mockReturnValue(new Promise(() => {}))
+
+    void actions.loadArchivedSessions('/workspace')
+
+    expect(state.archivedSessions).toEqual([])
+    expect(state.isLoadingArchivedSessions).toBe(true)
+  })
+
+  it('loadArchivedSessions ignores stale results from an earlier request', async () => {
+    const now = Date.now()
+    let resolveOlder: (sessions: any[]) => void = () => {}
+    const olderPromise = new Promise<any[]>((resolve) => {
+      resolveOlder = resolve
+    })
+    mockListSessions
+      .mockReturnValueOnce(olderPromise)
+      .mockResolvedValueOnce([
+        {
+          id: 'archived-new',
+          title: 'Archived New',
+          time: { created: now - 2000, updated: now - 1000, archived: now - 500 },
+          directory: '/workspace-b',
+        },
+      ])
+
+    const firstLoad = actions.loadArchivedSessions('/workspace-a')
+    const secondLoad = actions.loadArchivedSessions('/workspace-b')
+    await secondLoad
+
+    expect((state.archivedSessions as any[]).map((session) => session.id)).toEqual([
+      'archived-new',
+    ])
+
+    resolveOlder([
+      {
+        id: 'archived-stale',
+        title: 'Archived Stale',
+        time: { created: now - 4000, updated: now - 3000, archived: now },
+        directory: '/workspace-a',
+      },
+    ])
+    await firstLoad
+
+    expect((state.archivedSessions as any[]).map((session) => session.id)).toEqual([
+      'archived-new',
+    ])
+  })
+
+  it('loadArchivedSessions ignores results for a previous workspace', async () => {
+    const now = Date.now()
+    state.currentWorkspacePath = '/workspace-b'
+    mockListSessions.mockResolvedValue([
+      {
+        id: 'archived-stale',
+        title: 'Archived Stale',
+        time: { created: now - 2000, updated: now - 1000, archived: now },
+        directory: '/workspace-a',
+      },
+    ])
+
+    await actions.loadArchivedSessions('/workspace-a')
+
+    expect(state.archivedSessions).toEqual([])
+    expect(state.isLoadingArchivedSessions).toBe(false)
+  })
+
   it('openArchivedSession loads messages without adding to normal sessions', async () => {
     const now = Date.now()
     state.sessions = []

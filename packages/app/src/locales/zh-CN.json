@@ -80,6 +80,7 @@
     "backToActiveSession": "返回活跃会话",
     "archivedSession": "归档会话",
     "restoreSession": "恢复",
+    "archivedSessionLoadError": "无法加载归档会话",
     "restoreArchivedHint": "恢复此会话后可继续聊天",
     "agent": "助手",
     "startNewChat": "开始新对话",

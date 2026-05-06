@@ -415,6 +415,28 @@ describe('ChatPanel', () => {
     });
   });
 
+  it('shows archived message load errors in the read-only view', () => {
+    sessionState.viewingArchivedSessionId = 'archived-1';
+    sessionState.archivedSessionError = 'OpenCode API Error: unavailable';
+    sessionState.archivedSessions = [
+      {
+        id: 'archived-1',
+        title: 'Archived Todo Chat',
+        messages: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        isArchived: true,
+        archivedAt: new Date(),
+      },
+    ];
+
+    const { getByText } = render(<ChatPanel />);
+
+    expect(getByText('Could not load archived session')).toBeTruthy();
+    expect(getByText('OpenCode API Error: unavailable')).toBeTruthy();
+    expect(getByText('Restore this session to continue chatting')).toBeTruthy();
+  });
+
   it('ignores duplicate restore clicks while restore is pending', async () => {
     let resolveRestore: () => void = () => {};
     sessionState.restoreSession = vi.fn(
