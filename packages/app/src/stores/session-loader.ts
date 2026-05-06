@@ -39,15 +39,8 @@ const MAX_BULK_MESSAGE_SESSION_LOAD = 30;
 export function createLoaderActions(set: SessionSet, get: SessionGet) {
   let archivedLoadRequestId = 0;
 
-  const shouldApplyArchivedLoad = (requestId: number, directory?: string) => {
-    if (requestId !== archivedLoadRequestId) return false;
-    const currentDirectory = get().currentWorkspacePath ?? undefined;
-    if (directory && currentDirectory && currentDirectory !== directory) {
-      set({ isLoadingArchivedSessions: false });
-      return false;
-    }
-    return true;
-  };
+  const isCurrentArchivedLoad = (requestId: number) =>
+    requestId === archivedLoadRequestId;
 
   return {
     // Reset sessions (clear all session data and cache)
@@ -240,7 +233,7 @@ export function createLoaderActions(set: SessionSet, get: SessionGet) {
             ? { directory, roots: true, archived: true }
             : { roots: true, archived: true },
         );
-        if (!shouldApplyArchivedLoad(requestId, directory)) return;
+        if (!isCurrentArchivedLoad(requestId)) return;
 
         const archivedSessions = sessions
           .filter((session) => session.time?.archived != null && !session.parentID)
@@ -257,7 +250,7 @@ export function createLoaderActions(set: SessionSet, get: SessionGet) {
           archivedSessionError: null,
         });
       } catch (error) {
-        if (!shouldApplyArchivedLoad(requestId, directory)) return;
+        if (!isCurrentArchivedLoad(requestId)) return;
         set({
           archivedSessionError:
             error instanceof Error ? error.message : "Failed to load archived sessions",
