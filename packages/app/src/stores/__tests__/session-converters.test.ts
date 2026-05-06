@@ -170,4 +170,30 @@ describe("session converters archive metadata", () => {
     expect(converted.isArchived).toBeUndefined();
     expect(converted.archivedAt).toBeUndefined();
   });
+
+  it("preserves archive metadata when archived timestamp is zero", () => {
+    const converted = convertSessionListItem({
+      id: "ses_archived_epoch",
+      title: "Archived at epoch",
+      directory: "/workspace",
+      time: { created: 0, updated: 0, archived: 0 },
+    } as never);
+
+    expect(converted.isArchived).toBe(true);
+    expect(converted.archivedAt?.toISOString()).toBe("1970-01-01T00:00:00.000Z");
+  });
+
+  it("leaves null archived sessions unmarked", () => {
+    const now = Date.parse("2026-05-06T09:33:00.000Z");
+
+    const converted = convertSessionListItem({
+      id: "ses_restored",
+      title: "Restored chat",
+      directory: "/workspace",
+      time: { created: now - 1000, updated: now, archived: null },
+    } as never);
+
+    expect(converted.isArchived).toBeUndefined();
+    expect(converted.archivedAt).toBeUndefined();
+  });
 });

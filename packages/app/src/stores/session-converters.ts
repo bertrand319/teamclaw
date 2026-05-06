@@ -16,7 +16,7 @@ function isCompactionContinueMetadata(metadata: unknown): boolean {
 function archiveMetadata(
   time: { archived?: number | null },
 ): Pick<Session, "isArchived" | "archivedAt"> {
-  if (!time.archived) return {};
+  if (time.archived == null) return {};
   return {
     isArchived: true,
     archivedAt: new Date(time.archived),
