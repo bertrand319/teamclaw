@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render } from '@testing-library/react';
+import { fireEvent, render } from '@testing-library/react';
 
 // ── Browser API polyfills ──────────────────────────────────────────────
 
@@ -51,6 +51,19 @@ const sessionState = {
   viewingChildSessionId: null as string | null,
   childSessionMessages: {} as Record<string, unknown[]>,
   isLoadingChildMessages: false,
+  archivedSessions: [] as Array<{
+    id: string;
+    title: string;
+    messages: unknown[];
+    createdAt: Date;
+    updatedAt: Date;
+    isArchived?: boolean;
+    archivedAt?: Date;
+  }>,
+  viewingArchivedSessionId: null as string | null,
+  archivedSessionMessages: {} as Record<string, unknown[]>,
+  archivedSessionError: null as string | null,
+  isLoadingArchivedSessions: false,
   sessions: [] as unknown[],
   error: null as string | null,
   isConnected: true,
@@ -82,6 +95,8 @@ const sessionState = {
   createSession: vi.fn(),
   setActiveSession: vi.fn(),
   archiveSession: vi.fn(),
+  closeArchivedSession: vi.fn(),
+  restoreSession: vi.fn(() => Promise.resolve()),
   updateSessionTitle: vi.fn(),
   loadMoreSessions: vi.fn(),
   replyPermission: vi.fn(),
@@ -209,6 +224,11 @@ describe('ChatPanel', () => {
     sessionState.viewingChildSessionId = null;
     sessionState.childSessionMessages = {};
     sessionState.isLoadingChildMessages = false;
+    sessionState.archivedSessions = [];
+    sessionState.viewingArchivedSessionId = null;
+    sessionState.archivedSessionMessages = {};
+    sessionState.archivedSessionError = null;
+    sessionState.isLoadingArchivedSessions = false;
     sessionState.isConnected = true;
     sessionState.error = null;
     sessionState.sessionError = null;
@@ -226,6 +246,8 @@ describe('ChatPanel', () => {
     sessionState.setSelectedModel = vi.fn();
     sessionState.setDraftInput = vi.fn();
     sessionState.pollPermissions = vi.fn();
+    sessionState.closeArchivedSession = vi.fn();
+    sessionState.restoreSession = vi.fn(() => Promise.resolve());
     providerState.initAll = vi.fn();
     teamModeState.loadTeamConfig = vi.fn(() => Promise.resolve());
     teamModeState.applyTeamModelToOpenCode = vi.fn(() => Promise.resolve());
@@ -269,5 +291,60 @@ describe('ChatPanel', () => {
 
     expect(container.textContent).toContain('Child stream in progress');
     expect(container.textContent).toContain('Back to main session');
+  });
+
+  it('renders archived messages in read-only mode', () => {
+    sessionState.viewingArchivedSessionId = 'archived-1';
+    sessionState.archivedSessions = [
+      {
+        id: 'archived-1',
+        title: 'Archived Todo Chat',
+        messages: [],
+        createdAt: new Date('2026-05-01T10:00:00.000Z'),
+        updatedAt: new Date('2026-05-01T11:00:00.000Z'),
+        isArchived: true,
+        archivedAt: new Date('2026-05-02T10:00:00.000Z'),
+      },
+    ];
+    sessionState.archivedSessionMessages = {
+      'archived-1': [
+        {
+          id: 'msg-1',
+          sessionId: 'archived-1',
+          role: 'user',
+          content: 'Archived hello',
+          parts: [],
+          timestamp: new Date('2026-05-01T10:05:00.000Z'),
+        },
+      ],
+    };
+
+    const { container } = render(<ChatPanel />);
+
+    expect(container.textContent).toContain('Archived Todo Chat');
+    expect(container.textContent).toContain('Archived hello');
+    expect(container.textContent).toContain('Restore');
+    expect(container.textContent).toContain('Restore this session to continue chatting');
+  });
+
+  it('restores archived session from the read-only bar', async () => {
+    sessionState.viewingArchivedSessionId = 'archived-1';
+    sessionState.archivedSessions = [
+      {
+        id: 'archived-1',
+        title: 'Archived Todo Chat',
+        messages: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        isArchived: true,
+        archivedAt: new Date(),
+      },
+    ];
+
+    const { findByText } = render(<ChatPanel />);
+
+    fireEvent.click(await findByText('Restore'));
+
+    expect(sessionState.restoreSession).toHaveBeenCalledWith('archived-1');
   });
 });
