@@ -316,13 +316,13 @@ describe('session-loader: createLoaderActions', () => {
     ])
   })
 
-  it('loadArchivedSessions ignores results for a previous workspace', async () => {
+  it('loadArchivedSessions accepts an explicit workspace even while session state still references another workspace', async () => {
     const now = Date.now()
     state.currentWorkspacePath = '/workspace-b'
     mockListSessions.mockResolvedValue([
       {
-        id: 'archived-stale',
-        title: 'Archived Stale',
+        id: 'archived-new-workspace',
+        title: 'Archived New Workspace',
         time: { created: now - 2000, updated: now - 1000, archived: now },
         directory: '/workspace-a',
       },
@@ -330,7 +330,9 @@ describe('session-loader: createLoaderActions', () => {
 
     await actions.loadArchivedSessions('/workspace-a')
 
-    expect(state.archivedSessions).toEqual([])
+    expect((state.archivedSessions as any[]).map((session) => session.id)).toEqual([
+      'archived-new-workspace',
+    ])
     expect(state.isLoadingArchivedSessions).toBe(false)
   })
 
