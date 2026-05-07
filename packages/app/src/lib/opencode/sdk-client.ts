@@ -237,6 +237,38 @@ function dir(): string | undefined {
   return currentConfig?.workspacePath || undefined
 }
 
+type SyncHistoryEvent = {
+  id: string
+  aggregate_id: string
+  seq: number
+  type: string
+  data: Record<string, unknown>
+}
+
+function createSyncEventId(): string {
+  const random =
+    typeof globalThis.crypto?.randomUUID === 'function'
+      ? globalThis.crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(16).slice(2)}`
+  return `teamclaw-restore-${random}`
+}
+
+async function getNextSyncSequence(
+  c: OpencodeClient,
+  id: string,
+  directory: string,
+): Promise<number> {
+  const result = await c.sync.history.list({
+    directory,
+    body: {},
+  })
+  const events = unwrap(result) as unknown as SyncHistoryEvent[]
+  const latest = events
+    .filter((event) => event.aggregate_id === id)
+    .reduce((max, event) => Math.max(max, event.seq), -1)
+  return latest + 1
+}
+
 // ---------------------------------------------------------------------------
 // Session convenience wrappers
 // ---------------------------------------------------------------------------
@@ -298,11 +330,33 @@ export async function archiveSession(id: string, directory?: string): Promise<vo
 
 export async function restoreSession(id: string, directory?: string): Promise<void> {
   const c = getRawSdkClient()
-  const result = await c.session.update({
-    sessionID: id,
-    directory: directory || dir(),
-    time: { archived: null },
-  } as unknown as Parameters<typeof c.session.update>[0])
+  const resolvedDirectory = directory || dir()
+  if (!resolvedDirectory) {
+    throw new Error('Cannot restore an archived session without a workspace directory.')
+  }
+
+  // OpenCode's session.update schema only accepts numeric archive timestamps;
+  // clearing archive state has to go through the sync event projector.
+  const result = await c.sync.replay({
+    query_directory: resolvedDirectory,
+    body_directory: resolvedDirectory,
+    events: [
+      {
+        id: createSyncEventId(),
+        aggregateID: id,
+        seq: await getNextSyncSequence(c, id, resolvedDirectory),
+        type: 'session.updated.1',
+        data: {
+          sessionID: id,
+          info: {
+            time: {
+              archived: null,
+            },
+          },
+        },
+      },
+    ],
+  })
   unwrap(result)
 }
 

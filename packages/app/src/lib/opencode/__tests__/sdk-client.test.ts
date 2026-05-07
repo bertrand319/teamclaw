@@ -4,6 +4,8 @@ const mocks = vi.hoisted(() => ({
   createOpencodeClient: vi.fn(),
   sessionList: vi.fn(),
   experimentalSessionList: vi.fn(),
+  syncHistoryList: vi.fn(),
+  syncReplay: vi.fn(),
   requestInterceptorUse: vi.fn(),
 }))
 
@@ -11,7 +13,7 @@ vi.mock('@opencode-ai/sdk/v2/client', () => ({
   createOpencodeClient: mocks.createOpencodeClient,
 }))
 
-import { initOpenCodeClient, listSessions } from '@/lib/opencode/sdk-client'
+import { initOpenCodeClient, listSessions, restoreSession } from '@/lib/opencode/sdk-client'
 
 describe('sdk-client session wrappers', () => {
   beforeEach(() => {
@@ -32,9 +34,17 @@ describe('sdk-client session wrappers', () => {
           list: mocks.experimentalSessionList,
         },
       },
+      sync: {
+        history: {
+          list: mocks.syncHistoryList,
+        },
+        replay: mocks.syncReplay,
+      },
     })
     mocks.sessionList.mockResolvedValue({ data: [], error: undefined })
     mocks.experimentalSessionList.mockResolvedValue({ data: [], error: undefined })
+    mocks.syncHistoryList.mockResolvedValue({ data: [], error: undefined })
+    mocks.syncReplay.mockResolvedValue({ data: { sessionID: 'archived-1' }, error: undefined })
     initOpenCodeClient({ baseUrl: 'http://localhost:4096', workspacePath: '/workspace' })
   })
 
@@ -57,5 +67,42 @@ describe('sdk-client session wrappers', () => {
       archived: true,
     })
     expect(mocks.sessionList).not.toHaveBeenCalled()
+  })
+
+  it('restores an archived session by replaying a sync event that clears the archived time', async () => {
+    mocks.syncHistoryList.mockResolvedValue({
+      data: [
+        { id: 'event-0', aggregate_id: 'other-session', seq: 4, type: 'session.updated.1', data: {} },
+        { id: 'event-1', aggregate_id: 'archived-1', seq: 0, type: 'session.created.1', data: {} },
+        { id: 'event-2', aggregate_id: 'archived-1', seq: 1, type: 'session.updated.1', data: {} },
+      ],
+      error: undefined,
+    })
+
+    await restoreSession('archived-1', '/workspace-a')
+
+    expect(mocks.syncHistoryList).toHaveBeenCalledWith({
+      directory: '/workspace-a',
+      body: {},
+    })
+    expect(mocks.syncReplay).toHaveBeenCalledWith({
+      query_directory: '/workspace-a',
+      body_directory: '/workspace-a',
+      events: [
+        expect.objectContaining({
+          aggregateID: 'archived-1',
+          seq: 2,
+          type: 'session.updated.1',
+          data: {
+            sessionID: 'archived-1',
+            info: {
+              time: {
+                archived: null,
+              },
+            },
+          },
+        }),
+      ],
+    })
   })
 })
