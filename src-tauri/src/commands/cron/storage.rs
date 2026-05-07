@@ -19,6 +19,48 @@ impl Default for CronStorage {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn list_jobs_reflects_external_file_changes() {
+        let workspace = tempfile::tempdir().unwrap();
+        let workspace_path = workspace.path().to_str().unwrap();
+        let storage = CronStorage::new();
+
+        storage.init(workspace_path).await;
+        assert!(storage.list_jobs().await.is_empty());
+
+        let now = Utc::now().to_rfc3339();
+        let jobs_path = CronStorage::jobs_path(workspace_path);
+        std::fs::create_dir_all(jobs_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &jobs_path,
+            serde_json::to_string_pretty(&json!({
+                "jobs": [{
+                    "id": "external-job",
+                    "name": "External job",
+                    "enabled": true,
+                    "schedule": { "kind": "cron", "expr": "0 9 * * *" },
+                    "payload": { "message": "hello" },
+                    "deleteAfterRun": false,
+                    "createdAt": now,
+                    "updatedAt": now
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let jobs = storage.list_jobs().await;
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].id, "external-job");
+    }
+}
+
 impl Clone for CronStorage {
     fn clone(&self) -> Self {
         Self {
@@ -140,15 +182,46 @@ impl CronStorage {
         }
     }
 
+    /// Reload jobs from disk so changes made by external tools (such as the
+    /// teamclaw-introspect MCP sidecar) become visible to the UI and scheduler.
+    async fn reload_jobs_from_disk(&self) {
+        let workspace = self.workspace_path.read().await.clone();
+        let Some(ws) = workspace.as_ref() else {
+            return;
+        };
+
+        let jobs_path = Self::jobs_path(ws);
+        if !jobs_path.exists() {
+            return;
+        }
+
+        match std::fs::read_to_string(&jobs_path) {
+            Ok(content) => match serde_json::from_str::<CronJobsData>(&content) {
+                Ok(loaded) => {
+                    let mut data = self.data.write().await;
+                    *data = loaded;
+                }
+                Err(e) => {
+                    eprintln!("[Cron] Failed to parse jobs file during reload: {}", e);
+                }
+            },
+            Err(e) => {
+                eprintln!("[Cron] Failed to read jobs file during reload: {}", e);
+            }
+        }
+    }
+
     // ==================== Job CRUD ====================
 
     /// Get all jobs
     pub async fn list_jobs(&self) -> Vec<CronJob> {
+        self.reload_jobs_from_disk().await;
         self.data.read().await.jobs.clone()
     }
 
     /// Get a single job by ID
     pub async fn get_job(&self, job_id: &str) -> Option<CronJob> {
+        self.reload_jobs_from_disk().await;
         self.data
             .read()
             .await
