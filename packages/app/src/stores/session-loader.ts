@@ -37,6 +37,11 @@ type SessionGet = () => SessionState;
 const MAX_BULK_MESSAGE_SESSION_LOAD = 30;
 
 export function createLoaderActions(set: SessionSet, get: SessionGet) {
+  let archivedLoadRequestId = 0;
+
+  const isCurrentArchivedLoad = (requestId: number) =>
+    requestId === archivedLoadRequestId;
+
   return {
     // Reset sessions (clear all session data and cache)
     resetSessions: () => {
@@ -62,6 +67,11 @@ export function createLoaderActions(set: SessionSet, get: SessionGet) {
         isLoadingMore: false,
         hasMoreSessions: false,
         visibleSessionCount: UI_PAGE_SIZE,
+        archivedSessions: [],
+        isLoadingArchivedSessions: false,
+        archivedSessionError: null,
+        viewingArchivedSessionId: null,
+        archivedSessionMessages: {},
       });
     },
 
@@ -92,7 +102,7 @@ export function createLoaderActions(set: SessionSet, get: SessionGet) {
         // Filter out archived, child, and internal sessions
         const activeSessions = sessions.filter(
           (session) =>
-            !session.time?.archived &&
+            session.time?.archived == null &&
             !session.parentID,
         );
         const filteredCount = sessions.length - activeSessions.length;
@@ -147,7 +157,7 @@ export function createLoaderActions(set: SessionSet, get: SessionGet) {
           try {
             const children = await client.getSessionChildren(activeSessionId);
             apiChildSessions = children
-              .filter((c) => !c.time?.archived)
+              .filter((c) => c.time?.archived == null)
               .map(convertSessionListItem);
             if (apiChildSessions.length > 0) {
               console.log("[Session] Loaded", apiChildSessions.length, "child sessions from API for active session:", activeSessionId);
@@ -207,6 +217,126 @@ export function createLoaderActions(set: SessionSet, get: SessionGet) {
       );
     },
 
+    // Load archived root sessions separately from the normal session list
+    loadArchivedSessions: async (workspacePath?: string) => {
+      const requestId = ++archivedLoadRequestId;
+      const directory = workspacePath ?? get().currentWorkspacePath ?? undefined;
+      set({
+        archivedSessions: [],
+        isLoadingArchivedSessions: true,
+        archivedSessionError: null,
+      });
+      try {
+        const client = getOpenCodeClient();
+        const sessions = await client.listSessions(
+          directory
+            ? { directory, roots: true, archived: true }
+            : { roots: true, archived: true },
+        );
+        if (!isCurrentArchivedLoad(requestId)) return;
+
+        const archivedSessions = sessions
+          .filter((session) => session.time?.archived != null && !session.parentID)
+          .map(convertSessionListItem)
+          .sort((a, b) => {
+            const aTime = a.archivedAt ?? a.updatedAt;
+            const bTime = b.archivedAt ?? b.updatedAt;
+            return bTime.getTime() - aTime.getTime();
+          });
+
+        set({
+          archivedSessions,
+          isLoadingArchivedSessions: false,
+          archivedSessionError: null,
+        });
+      } catch (error) {
+        if (!isCurrentArchivedLoad(requestId)) return;
+        set({
+          archivedSessionError:
+            error instanceof Error ? error.message : "Failed to load archived sessions",
+          isLoadingArchivedSessions: false,
+        });
+      }
+    },
+
+    // Open archived messages without adding the session to the active session list
+    openArchivedSession: async (id: string) => {
+      set({ viewingArchivedSessionId: id, archivedSessionError: null });
+      try {
+        const client = getOpenCodeClient();
+        const messages = await client.getMessages(id);
+        if (get().viewingArchivedSessionId !== id) return;
+
+        const converted = messages.map(convertMessage);
+
+        set((state) => ({
+          archivedSessionMessages: {
+            ...state.archivedSessionMessages,
+            [id]: converted,
+          },
+          archivedSessionError: null,
+        }));
+      } catch (error) {
+        if (get().viewingArchivedSessionId !== id) return;
+        set({
+          archivedSessionError:
+            error instanceof Error ? error.message : "Failed to load archived messages",
+        });
+      }
+    },
+
+    closeArchivedSession: () => {
+      set({ viewingArchivedSessionId: null });
+    },
+
+    restoreSession: async (id: string) => {
+      try {
+        const client = getOpenCodeClient();
+        const session = get().archivedSessions.find((s) => s.id === id);
+        const directory = session?.directory ?? get().currentWorkspacePath ?? undefined;
+
+        await client.restoreSession(id, directory);
+
+        await get().loadSessions(directory);
+        if (!get().sessions.some((s) => s.id === id)) {
+          set({ archivedSessionError: "Restored session was not found after reload" });
+          return;
+        }
+
+        await get().setActiveSession(id);
+        const stateAfterActivation = get();
+        if (
+          stateAfterActivation.activeSessionId !== id ||
+          !getSessionById(id) ||
+          stateAfterActivation.isLoading ||
+          stateAfterActivation.error
+        ) {
+          set({ archivedSessionError: "Restored session could not be opened" });
+          return;
+        }
+
+        set((state) => {
+          const archivedSessionMessages = { ...state.archivedSessionMessages };
+          delete archivedSessionMessages[id];
+
+          return {
+            archivedSessions: state.archivedSessions.filter((s) => s.id !== id),
+            archivedSessionMessages,
+            viewingArchivedSessionId:
+              state.viewingArchivedSessionId === id
+                ? null
+                : state.viewingArchivedSessionId,
+            archivedSessionError: null,
+          };
+        });
+      } catch (error) {
+        set({
+          archivedSessionError:
+            error instanceof Error ? error.message : "Failed to restore session",
+        });
+      }
+    },
+
     // Create a new session
     createSession: async (_workspacePath?: string) => {
       // Save current session's message queue and pending question to cache before creating new session
@@ -243,6 +373,7 @@ export function createLoaderActions(set: SessionSet, get: SessionGet) {
           return {
             sessions: newSessions,
             activeSessionId: session.id,
+            viewingArchivedSessionId: null,
             isLoading: true,
             messageQueue: [],
             todos: [],
@@ -278,7 +409,14 @@ export function createLoaderActions(set: SessionSet, get: SessionGet) {
       } = get();
 
       if (id !== prevSessionId) {
-        set({ viewingChildSessionId: null, childSessionMessages: {} });
+        const isRestoredArchivedSession =
+          get().archivedSessions.some((s) => s.id === id) &&
+          get().sessions.some((s) => s.id === id);
+        set({
+          viewingChildSessionId: null,
+          childSessionMessages: {},
+          ...(isRestoredArchivedSession ? {} : { viewingArchivedSessionId: null }),
+        });
       }
 
       // Save current session's todos, diff, message queue, and pending questions to cache before switching
@@ -469,7 +607,7 @@ export function createLoaderActions(set: SessionSet, get: SessionGet) {
           if (childSessionsData.length > 0) {
             const existingIds = new Set(newSessions.map((s) => s.id));
             const apiChildren = childSessionsData
-              .filter((c) => !c.time?.archived && !existingIds.has(c.id))
+              .filter((c) => c.time?.archived == null && !existingIds.has(c.id))
               .map(convertSessionListItem);
             if (apiChildren.length > 0) {
               console.log("[Session] Merged", apiChildren.length, "API child sessions for session:", id);
@@ -643,7 +781,7 @@ export function createLoaderActions(set: SessionSet, get: SessionGet) {
         );
 
         const activeSessions = allSessions.filter(
-          (s) => !s.time?.archived,
+          (s) => s.time?.archived == null,
         );
 
         const existingSessions = get().sessions;

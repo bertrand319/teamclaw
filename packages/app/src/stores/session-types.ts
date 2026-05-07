@@ -145,6 +145,8 @@ export interface Session {
   messageCount?: number;
   directory?: string; // Working directory for this session
   parentID?: string; // Parent session ID (for child/subagent sessions)
+  isArchived?: boolean;
+  archivedAt?: Date;
 }
 
 // Child session (subagent) streaming state
@@ -227,12 +229,23 @@ export interface SessionState {
   childSessionMessages: Record<string, Message[]>;
   isLoadingChildMessages: boolean;
 
+  // Archived session viewing - separate from active session navigation
+  archivedSessions: Session[];
+  isLoadingArchivedSessions: boolean;
+  archivedSessionError: string | null;
+  viewingArchivedSessionId: string | null;
+  archivedSessionMessages: Record<string, Message[]>;
+
   // Actions - Session management
   loadSessions: (workspacePath?: string) => Promise<void>;
   loadMoreSessions: () => Promise<void>;
   createSession: (workspacePath?: string) => Promise<Session | null>;
   setActiveSession: (id: string) => Promise<void>;
   archiveSession: (id: string) => Promise<void>;
+  loadArchivedSessions: (workspacePath?: string) => Promise<void>;
+  openArchivedSession: (id: string) => Promise<void>;
+  closeArchivedSession: () => void;
+  restoreSession: (id: string) => Promise<void>;
   updateSessionTitle: (id: string, title: string) => Promise<void>;
   toggleSessionPinned: (id: string) => void;
   resetSessions: () => void;

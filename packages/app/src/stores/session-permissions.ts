@@ -191,7 +191,7 @@ export function createPermissionActions(set: SessionSet, get: SessionGet) {
   };
 
   const isArchivedSession = (session: SessionLookupInfo | null | undefined) =>
-    Boolean(session?.time?.archived);
+    session?.time?.archived != null;
 
   const appendLookupSession = (
     sessions: Pick<Session, "id" | "parentID">[],
